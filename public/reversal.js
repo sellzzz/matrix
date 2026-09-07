@@ -46,6 +46,23 @@ function fmtDateTime(value) {
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
 }
 
+function tradingViewMeta(row) {
+  const raw = String(row?.symbol || "").trim().toUpperCase();
+  let tvSymbol = row?.tradingViewSymbol || "";
+  if (!tvSymbol && raw.endsWith(".HK")) tvSymbol = `HKEX:${raw.slice(0, -3).replace(/^0+(?=\d)/, "")}`;
+  if (!tvSymbol && ["XAUUSD", "XAGUSD"].includes(raw)) tvSymbol = `OANDA:${raw}`;
+  if (!tvSymbol && raw.endsWith("USDT")) tvSymbol = `BINANCE:${raw}.P`;
+  const chartUrl = row?.chartUrl || (tvSymbol ? `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(tvSymbol)}` : "");
+  return { tvSymbol, chartUrl };
+}
+
+function tradingViewLink(row, showCode = false) {
+  const { tvSymbol, chartUrl } = tradingViewMeta(row);
+  const label = showCode && tvSymbol ? tvSymbol : row?.symbol || "-";
+  if (!chartUrl) return escapeHtml(label);
+  return `<a class="tvSymbolLink" href="${escapeHtml(chartUrl)}" target="_blank" rel="noopener" title="在 TradingView 打开 ${escapeHtml(tvSymbol)}">${escapeHtml(label)}</a>`;
+}
+
 function renderHistory(records) {
   if (!records.length) {
     els.historyBody.innerHTML = '<tr><td class="empty" colspan="5">暂时没有已记录信号</td></tr>';
@@ -56,7 +73,7 @@ function renderHistory(records) {
     const approaching = record.status === "approaching";
     return `<tr>
       <td>${fmtDateTime(record.recordedAt)}</td>
-      <td class="symbol">${escapeHtml(record.symbol)}<small>${escapeHtml(record.market)}</small></td>
+      <td class="symbol">${tradingViewLink(record, true)}<small>${escapeHtml(record.market)} · ${escapeHtml(record.symbol)}</small></td>
       <td class="positive">${approaching ? "接近预警" : "重新进入"}</td>
       <td>${support ? "支撑 · 潜在反弹" : "阻力 · 潜在回落"}</td>
       <td><b>${fmtPrice(record.current?.price)}</b><small>${fmtPrice(record.zoneLow)} - ${fmtPrice(record.zoneHigh)}</small></td>
@@ -121,7 +138,7 @@ function renderSignals(signals) {
     const approaching = signal.isSecondApproach && !signal.isSecondTouch;
     return `<article class="reversalSignal ${support ? "isSupport" : "isResistance"}">
       <div class="signalState">${approaching ? "\u63a5\u8fd1\u9884\u8b66" : "\u91cd\u65b0\u8fdb\u5165"}</div>
-      <div class="reversalSignalTop"><span class="signalBadge">${support ? "支撑 · 潜在反弹" : "阻力 · 潜在回落"}</span><strong>${escapeHtml(signal.symbol)}</strong><span class="signalMarket">${escapeHtml(signal.market)}</span></div>
+      <div class="reversalSignalTop"><span class="signalBadge">${support ? "支撑 · 潜在反弹" : "阻力 · 潜在回落"}</span><strong>${tradingViewLink(signal, true)}</strong><span class="signalMarket">${escapeHtml(signal.market)}</span></div>
       <div class="reversalSignalGrid">
         <div><span>当前价格</span><b>${fmtPrice(signal.current?.price)}</b></div>
         <div><span>关键区域</span><b>${fmtPrice(signal.zoneLow)} - ${fmtPrice(signal.zoneHigh)}</b></div>
@@ -142,7 +159,7 @@ function renderWatch(rows) {
     const firstTouch = ["revisit", "second-touch", "approaching"].includes(row.status);
     const zone = row.zones?.[0];
     return `<tr>
-      <td class="symbol">${escapeHtml(row.symbol)}</td>
+      <td class="symbol">${tradingViewLink(row, true)}<small>${escapeHtml(row.symbol)}</small></td>
       <td>${escapeHtml(row.market)}</td>
       <td class="${firstTouch ? "positive" : ""}">${firstTouch ? (row.status === "approaching" ? "接近预警" : "重新进入") : row.status === "error" ? "读取失败" : "观察中"}</td>
       <td>${fmtPrice(row.current?.price)}</td>
@@ -184,7 +201,7 @@ els.refreshBtn.addEventListener("click", scan);
 els.statsBtn.addEventListener("click", loadStats);
 els.exportStatsBtn.addEventListener("click", () => {
   if (!latestStats?.records?.length) return;
-  const headers = ["symbol", "market", "type", "status", "originTime", "originPoint", "triggerTime", "entry", "zoneLow", "zoneHigh", "triggerOpen", "triggerHigh", "triggerLow", "triggerClose", "outcome", "barsToOutcome", "maxFavorablePct", "maxAdversePct"];
+  const headers = ["symbol", "tradingViewSymbol", "chartUrl", "market", "type", "status", "originTime", "originPoint", "triggerTime", "entry", "zoneLow", "zoneHigh", "triggerOpen", "triggerHigh", "triggerLow", "triggerClose", "outcome", "barsToOutcome", "maxFavorablePct", "maxAdversePct"];
   const lines = [headers.join(","), ...latestStats.records.map((row) => headers.map((key) => {
     const value = ["originTime", "triggerTime"].includes(key) && row[key] ? new Date(row[key]).toISOString() : row[key] ?? "";
     return `"${String(value).replaceAll('"', '""')}"`;

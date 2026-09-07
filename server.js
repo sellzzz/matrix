@@ -217,6 +217,29 @@ const reversalPresets = new Map([
   ["BUSDT", { symbol: "BUSDT", name: "B", market: "加密资产", source: "binance", sourceSymbol: "BUSDT" }],
 ]);
 
+function getTradingViewSymbol(symbol, market = "") {
+  const raw = String(symbol || "").trim().toUpperCase();
+  if (!raw) return "";
+  if (raw.endsWith(".HK")) {
+    return `HKEX:${raw.slice(0, -3).replace(/^0+(?=\d)/, "")}`;
+  }
+  if (["XAUUSD", "XAGUSD"].includes(raw)) return `OANDA:${raw}`;
+  if (raw.endsWith("USDT")) return `BINANCE:${raw}.P`;
+  return market === "港股" ? `HKEX:${raw.replace(/^0+(?=\d)/, "")}` : raw;
+}
+
+function withTradingView(asset) {
+  if (!asset) return asset;
+  const tradingViewSymbol = getTradingViewSymbol(asset.symbol, asset.market);
+  return {
+    ...asset,
+    tradingViewSymbol,
+    chartUrl: tradingViewSymbol
+      ? `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(tradingViewSymbol)}`
+      : "",
+  };
+}
+
 function resolveReversalAsset(value) {
   const raw = String(value || "").trim().toUpperCase();
   if (!raw) return null;
@@ -226,11 +249,11 @@ function resolveReversalAsset(value) {
     ["PUMPFUN-USD", "PUMPUSDT"],
   ]);
   if (aliases.has(raw)) return resolveReversalAsset(aliases.get(raw));
-  if (reversalPresets.has(raw)) return reversalPresets.get(raw);
+  if (reversalPresets.has(raw)) return withTradingView(reversalPresets.get(raw));
   if (/\.HK$|=|\^|-USD$/.test(raw)) {
-    return { symbol: raw, name: raw, market: "自定义行情", source: "yahoo", sourceSymbol: raw };
+    return withTradingView({ symbol: raw, name: raw, market: "自定义行情", source: "yahoo", sourceSymbol: raw });
   }
-  return { symbol: raw, name: raw, market: "币安合约", source: "binance", sourceSymbol: raw };
+  return withTradingView({ symbol: raw, name: raw, market: "币安合约", source: "binance", sourceSymbol: raw });
 }
 
 async function getTopReversalFutures(limit = 30) {
@@ -585,6 +608,8 @@ function buildReversalStats(asset, dailyCandles, triggerCandles, horizon, target
       }
       samples.push({
         symbol: asset.symbol,
+        tradingViewSymbol: asset.tradingViewSymbol,
+        chartUrl: asset.chartUrl,
         market: asset.market,
         type: signal.type,
         status: "revisit",

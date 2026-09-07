@@ -79,6 +79,18 @@ function fmtPrice(value) {
   return n.toPrecision(5);
 }
 
+function tradingViewChart(row) {
+  const raw = String(row?.symbol || "").trim().toUpperCase();
+  let tvSymbol = row?.tradingViewSymbol || "";
+  if (!tvSymbol && raw.endsWith(".HK")) tvSymbol = `HKEX:${raw.slice(0, -3).replace(/^0+(?=\d)/, "")}`;
+  if (!tvSymbol && ["XAUUSD", "XAGUSD"].includes(raw)) tvSymbol = `OANDA:${raw}`;
+  if (!tvSymbol && raw.endsWith("USDT")) tvSymbol = `BINANCE:${raw}.P`;
+  return {
+    symbol: tvSymbol || raw,
+    url: row?.chartUrl || (tvSymbol ? `https://www.tradingview.com/chart/?symbol=${encodeURIComponent(tvSymbol)}` : ""),
+  };
+}
+
 async function fetchWithTimeout(url, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -144,8 +156,12 @@ function buildReversalMessage(records) {
   const rows = records.slice(0, 10).map((row, index) => {
     const support = row.type === "support-touch";
     const state = row.status === "approaching" ? "Approaching alert" : "Zone re-entry";
+    const chart = tradingViewChart(row);
+    const symbol = chart.url
+      ? `<a href="${htmlEscape(chart.url)}"><b>${htmlEscape(chart.symbol)}</b></a>`
+      : `<b>${htmlEscape(chart.symbol || "-")}</b>`;
     return [
-      `${index + 1}. <b>${htmlEscape(row.symbol || "-")}</b> · ${state}`,
+      `${index + 1}. ${symbol} · ${state}`,
       `${support ? "Support / potential rebound" : "Resistance / potential pullback"}`,
       `Price ${fmtPrice(row.triggerPrice ?? row.current?.price)} | Zone ${fmtPrice(row.zoneLow)} - ${fmtPrice(row.zoneHigh)}`,
       `Anchor ${fmtTime(row.originTime)} | Trigger ${fmtTime(row.triggerTime ?? row.touchTime)}`,

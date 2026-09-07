@@ -569,6 +569,17 @@ td.symbol {
   font-weight: 700;
 }
 
+.tvSymbolLink {
+  color: #60a5fa;
+  text-decoration: none;
+  transition: color 160ms ease, opacity 160ms ease;
+}
+
+.tvSymbolLink:hover {
+  color: #93c5fd;
+  text-decoration: underline;
+}
+
 .positive {
   color: var(--green);
   font-weight: 700;
