@@ -266,7 +266,7 @@ async function getReversalCandles(asset) {
       low: Number(quote.low?.[index]),
       close: Number(quote.close?.[index]),
       volume: Number(quote.volume?.[index]),
-    })).filter((row) => [row.open, row.high, row.low, row.close].every(Number.isFinite));
+    })).filter(isValidCandle);
   }
 
   const rows = await binance(`/fapi/v1/klines?symbol=${encodeURIComponent(asset.sourceSymbol)}&interval=1d&limit=365`);
@@ -277,7 +277,82 @@ async function getReversalCandles(asset) {
     low: Number(row[3]),
     close: Number(row[4]),
     volume: Number(row[5]),
-  })).filter((row) => [row.open, row.high, row.low, row.close].every(Number.isFinite));
+  })).filter(isValidCandle);
+}
+
+function isValidCandle(row) {
+  return [row.open, row.high, row.low, row.close].every((value) => Number.isFinite(value) && value > 0);
+}
+
+function normalizeKline(row) {
+  return {
+    timestamp: Number(row[0]),
+    open: Number(row[1]),
+    high: Number(row[2]),
+    low: Number(row[3]),
+    close: Number(row[4]),
+    volume: Number(row[5]),
+  };
+}
+
+function aggregateFourHourCandles(rows) {
+  const days = new Map();
+  for (const row of rows) {
+    const day = new Date(row.timestamp).toISOString().slice(0, 10);
+    if (!days.has(day)) days.set(day, []);
+    days.get(day).push(row);
+  }
+  return [...days.values()].flatMap((dayRows) => {
+    const ordered = dayRows.sort((a, b) => a.timestamp - b.timestamp);
+    const result = [];
+    for (let index = 0; index < ordered.length; index += 4) {
+      const group = ordered.slice(index, index + 4);
+      if (!group.length) continue;
+      result.push({
+        timestamp: group[0].timestamp,
+        open: group[0].open,
+        high: Math.max(...group.map((row) => row.high)),
+        low: Math.min(...group.map((row) => row.low)),
+        close: group.at(-1).close,
+        volume: group.reduce((sum, row) => sum + Number(row.volume || 0), 0),
+      });
+    }
+    return result;
+  });
+}
+
+async function getReversalTriggerCandles(asset) {
+  if (asset.source === "yahoo") {
+    const chart = await yahooChart(asset.sourceSymbol, { range: "1y", interval: "1h" });
+    const timestamps = chart.timestamp || [];
+    const quote = chart.indicators?.quote?.[0] || {};
+    const hourly = timestamps.map((timestamp, index) => ({
+      timestamp: Number(timestamp) * 1000,
+      open: Number(quote.open?.[index]),
+      high: Number(quote.high?.[index]),
+      low: Number(quote.low?.[index]),
+      close: Number(quote.close?.[index]),
+      volume: Number(quote.volume?.[index]),
+    })).filter(isValidCandle);
+    return aggregateFourHourCandles(hourly);
+  }
+
+  const intervalMs = 4 * 60 * 60 * 1000;
+  const earliest = Date.now() - 370 * 24 * 60 * 60 * 1000;
+  const pages = [];
+  let endTime = Date.now();
+  let pageCount = 0;
+  while (endTime > earliest && pageCount < 2) {
+    const rows = await binance(`/fapi/v1/klines?symbol=${encodeURIComponent(asset.sourceSymbol)}&interval=4h&limit=1500&endTime=${endTime}`);
+    if (!Array.isArray(rows) || !rows.length) break;
+    pageCount += 1;
+    pages.unshift(...rows);
+    const oldest = Number(rows[0][0]);
+    if (!Number.isFinite(oldest) || oldest <= earliest || rows.length < 1500) break;
+    endTime = oldest - intervalMs;
+  }
+  const unique = [...new Map(pages.map((row) => [Number(row[0]), row])).values()];
+  return unique.map(normalizeKline).filter(isValidCandle);
 }
 
 function averageRange(candles, index) {
@@ -298,82 +373,123 @@ function isPivot(candles, index, side) {
 }
 
 function touchesZone(candle, zone) {
-  return candle.low <= zone.high && candle.high >= zone.low;
+  const low = Number(zone.zoneLow ?? zone.low);
+  const high = Number(zone.zoneHigh ?? zone.high);
+  return candle.low <= high && candle.high >= low;
+}
+
+function isSafeSide(candle, zone, side) {
+  const low = Number(zone.zoneLow ?? zone.low);
+  const high = Number(zone.zoneHigh ?? zone.high);
+  return side === "support" ? candle.close > high : candle.close < low;
+}
+
+function isValidEntry(candle, previous, zone, side) {
+  if (!previous || !isSafeSide(previous, zone, side) || !touchesZone(candle, zone)) return false;
+  const low = Number(zone.zoneLow ?? zone.low);
+  const high = Number(zone.zoneHigh ?? zone.high);
+  return side === "support" ? candle.close >= low : candle.close <= high;
+}
+
+function buildDailyZones(asset, candles) {
+  const minAgeBars = 10;
+  const zones = [];
+  for (const side of ["support", "resistance"]) {
+    for (let index = 2; index <= candles.length - 3; index += 1) {
+      if (!isPivot(candles, index, side)) continue;
+      const point = side === "support" ? candles[index].low : candles[index].high;
+      const width = Math.max(point * 0.01, averageRange(candles, index) * 0.7);
+      const range = side === "support"
+        ? { low: point - width * 0.35, high: point + width }
+        : { low: point - width, high: point + width * 0.35 };
+      zones.push({
+        side,
+        type: side === "support" ? "support-touch" : "resistance-touch",
+        label: side === "support" ? "支撑区再次触及" : "阻力区再次触及",
+        direction: side === "support" ? "potential-rebound" : "potential-pullback",
+        zoneLow: range.low,
+        zoneHigh: range.high,
+        point,
+        originTime: candles[index].timestamp,
+        confirmedTime: candles[index + 2].timestamp,
+        eligibleTime: candles[Math.min(candles.length - 1, index + minAgeBars)]?.timestamp ?? Infinity,
+        originIndex: index,
+      });
+    }
+  }
+  return zones;
+}
+
+function findZoneEntries(triggerCandles, zone) {
+  const entries = [];
+  for (let index = 1; index < triggerCandles.length; index += 1) {
+    if (triggerCandles[index].timestamp < zone.eligibleTime) continue;
+    if (isValidEntry(triggerCandles[index], triggerCandles[index - 1], zone, zone.side)) entries.push(triggerCandles[index]);
+  }
+  return entries;
 }
 
 function dedupeReversalSignals(signals) {
   const gapMs = REVERSAL_SIGNAL_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
   const kept = [];
-  for (const signal of signals.slice().sort((a, b) => a.touchTime - b.touchTime || a.distancePct - b.distancePct)) {
+  for (const signal of signals.slice().sort((a, b) => a.touchTime - b.touchTime || a.distancePct - b.distancePct || b.originTime - a.originTime)) {
     if (!kept.some((item) => item.type === signal.type && Math.abs(item.touchTime - signal.touchTime) < gapMs)) kept.push(signal);
   }
   return kept;
 }
 
-function buildReversalSignal(asset, candles) {
-  if (candles.length < 20) return { status: "insufficient_data", current: null, signals: [], zones: [] };
-  const current = candles.at(-1);
-  const previous = candles.at(-2);
-  const currentIndex = candles.length - 1;
-  const minAgeBars = asset.source === "binance" ? 14 : 10;
+function buildReversalSignal(asset, dailyCandles, triggerCandles) {
+  if (dailyCandles.length < 20 || triggerCandles.length < 2) return { status: "insufficient_data", current: null, signals: [], zones: [] };
+  const current = triggerCandles.at(-1);
+  const previous = triggerCandles.at(-2);
   const proximityPct = 1.2;
   const candidates = [];
 
-  for (const side of ["support", "resistance"]) {
-    for (let index = 2; index <= currentIndex - 3; index += 1) {
-      if (!isPivot(candles, index, side) || currentIndex - index < minAgeBars) continue;
-      const point = side === "support" ? candles[index].low : candles[index].high;
-      const width = Math.max(point * 0.01, averageRange(candles, index) * 0.7);
-      const zone = side === "support"
-        ? { low: point - width * 0.35, high: point + width }
-        : { low: point - width, high: point + width * 0.35 };
-      const previousBars = candles.slice(index + 3, currentIndex);
-      const priorTouchCount = previousBars.filter((candle) => touchesZone(candle, zone)).length;
-      const hadPriorTouch = priorTouchCount > 0;
-      const isTouching = touchesZone(current, zone);
-      const distance = current.close < zone.low
-        ? ((zone.low - current.close) / current.close) * 100
-        : current.close > zone.high
-          ? ((current.close - zone.high) / current.close) * 100
+  for (const zone of buildDailyZones(asset, dailyCandles)) {
+      if (current.timestamp < zone.eligibleTime) continue;
+      const entries = findZoneEntries(triggerCandles.slice(0, -1), zone);
+      const hasPriorEntry = entries.length > 0;
+      const isTouching = isValidEntry(current, previous, zone, zone.side) && !hasPriorEntry;
+      const distance = current.close < zone.zoneLow
+        ? ((zone.zoneLow - current.close) / current.close) * 100
+        : current.close > zone.zoneHigh
+          ? ((current.close - zone.zoneHigh) / current.close) * 100
           : 0;
-      const movingToward = side === "support"
+      const movingToward = zone.side === "support"
         ? current.close < previous.close
         : current.close > previous.close;
-      const isApproaching = !isTouching && movingToward && Math.abs(distance) <= proximityPct;
+      const approachingFromSafeSide = isSafeSide(current, zone, zone.side);
+      const isApproaching = !hasPriorEntry && !isTouching && approachingFromSafeSide && movingToward && Math.abs(distance) <= proximityPct;
       candidates.push({
-        type: side === "support" ? "support-touch" : "resistance-touch",
-        label: side === "support" ? "支撑区第二次确认" : "阻力区第二次确认",
-        direction: side === "support" ? "potential-rebound" : "potential-pullback",
-        zoneLow: zone.low,
-        zoneHigh: zone.high,
-        point,
-        originTime: candles[index].timestamp,
+        ...zone,
         touchTime: current.timestamp,
-        ageBars: currentIndex - index,
+        triggerTime: current.timestamp,
+        triggerPrice: zone.side === "support" ? zone.zoneHigh : zone.zoneLow,
+        triggerCandle: { open: current.open, high: current.high, low: current.low, close: current.close },
+        ageBars: dailyCandles.filter((candle) => candle.timestamp > zone.originTime && candle.timestamp <= current.timestamp).length,
         distancePct: Math.abs(distance),
-        wickSize: side === "support" ? current.low : current.high,
+        wickSize: zone.side === "support" ? current.low : current.high,
         isTouching,
-        isFirstTouch: isTouching && !hadPriorTouch,
-        isSecondTouch: isTouching && priorTouchCount === 1,
+        isFirstTouch: isTouching,
+        isSecondTouch: isTouching,
         isApproaching,
-        isFirstApproach: isApproaching && priorTouchCount === 0,
-        isSecondApproach: isApproaching && priorTouchCount === 1,
-        priorTouchCount,
-        hadPriorTouch,
+        isFirstApproach: isApproaching,
+        isSecondApproach: isApproaching,
+        priorTouchCount: hasPriorEntry ? 1 : 0,
+        hadPriorTouch: hasPriorEntry,
       });
-    }
   }
 
   const signals = dedupeReversalSignals(candidates
     .filter((candidate) => candidate.isSecondTouch || candidate.isSecondApproach)
-    .sort((a, b) => a.distancePct - b.distancePct || b.ageBars - a.ageBars));
+    .sort((a, b) => a.distancePct - b.distancePct || a.ageBars - b.ageBars));
   const zones = candidates
     .slice()
-    .sort((a, b) => a.distancePct - b.distancePct || b.ageBars - a.ageBars)
+    .sort((a, b) => a.distancePct - b.distancePct || a.ageBars - b.ageBars)
     .slice(0, 6);
   return {
-    status: signals.length ? (signals.some((signal) => signal.isSecondTouch) ? "second-touch" : "approaching") : "waiting",
-    current: { price: current.close, time: current.timestamp },
+    status: signals.length ? (signals.some((signal) => signal.isSecondTouch) ? "revisit" : "approaching") : "waiting",
+    current: { price: current.close, time: current.timestamp, timeframe: "4h" },
     signals: signals.slice(0, 2),
     zones,
   };
@@ -387,7 +503,7 @@ async function loadReversalHistory() {
 }
 
 function reversalHistoryKey(signal) {
-  const state = signal.isSecondTouch ? "second-touch" : "approaching";
+  const state = signal.isSecondTouch ? "revisit" : "approaching";
   return [signal.symbol, signal.type, state, signal.originTime, signal.touchTime].join(":");
 }
 
@@ -400,7 +516,7 @@ async function recordReversalSignals(signals) {
       ...signal,
       recordKey: reversalHistoryKey(signal),
       recordedAt: new Date().toISOString(),
-      status: signal.isSecondTouch ? "second-touch" : "approaching",
+      status: signal.isSecondTouch ? "revisit" : "approaching",
       zones: undefined,
       signals: undefined,
     }))
@@ -419,19 +535,33 @@ async function handleReversalHistory(req, res) {
   json(res, 200, { generatedAt: new Date().toISOString(), records: history.slice(0, limit) });
 }
 
-function buildReversalStats(asset, candles, horizon, targetPct) {
+function buildReversalStats(asset, dailyCandles, triggerCandles, horizon, targetPct) {
+  const horizonMs = horizon * 24 * 60 * 60 * 1000;
+  const candidates = [];
+  const dailyZones = buildDailyZones(asset, dailyCandles);
+  for (const zone of dailyZones) {
+    const entryCandle = findZoneEntries(triggerCandles, zone)[0];
+    if (!entryCandle) continue;
+    candidates.push({
+      ...zone,
+      touchTime: entryCandle.timestamp,
+      triggerTime: entryCandle.timestamp,
+      triggerPrice: zone.side === "support" ? zone.zoneHigh : zone.zoneLow,
+      triggerCandle: { open: entryCandle.open, high: entryCandle.high, low: entryCandle.low, close: entryCandle.close },
+      distancePct: 0,
+    });
+  }
+
+  const signals = dedupeReversalSignals(candidates.sort((a, b) => a.touchTime - b.touchTime || a.originTime - b.originTime));
   const samples = [];
-  for (let end = 20; end < candles.length - 1; end += 1) {
-    const snapshot = candles.slice(0, end + 1);
-    const signals = buildReversalSignal(asset, snapshot).signals;
-    for (const signal of signals) {
-      const future = candles.slice(end + 1, Math.min(candles.length, end + 1 + horizon));
-      if (future.length < horizon) continue;
+  for (const signal of signals) {
       const support = signal.type === "support-touch";
-      const entry = Number(snapshot.at(-1).close);
+      const entry = signal.triggerPrice;
       const target = support ? entry * (1 + targetPct / 100) : entry * (1 - targetPct / 100);
+      const future = triggerCandles.filter((candle) => candle.timestamp > signal.triggerTime && candle.timestamp <= signal.triggerTime + horizonMs);
+      if (!future.length) continue;
       let outcome = "timeout";
-      let barsToOutcome = horizon;
+      let barsToOutcome = future.length;
       let maxFavorablePct = 0;
       let maxAdversePct = 0;
       for (let offset = 0; offset < future.length; offset += 1) {
@@ -442,25 +572,49 @@ function buildReversalStats(asset, candles, horizon, targetPct) {
         maxAdversePct = Math.max(maxAdversePct, adverse);
         const hitTarget = support ? candle.high >= target : candle.low <= target;
         const invalidated = support ? candle.low < signal.zoneLow : candle.high > signal.zoneHigh;
+        if (hitTarget && invalidated) {
+          outcome = "ambiguous";
+          barsToOutcome = offset + 1;
+          break;
+        }
         if (invalidated || hitTarget) {
           outcome = invalidated ? "invalidated" : "successful";
           barsToOutcome = offset + 1;
           break;
         }
       }
-      samples.push({ symbol: asset.symbol, type: signal.type, status: signal.isSecondTouch ? "second-touch" : "approaching", signalTime: signal.touchTime, entry, zoneLow: signal.zoneLow, zoneHigh: signal.zoneHigh, outcome, barsToOutcome, maxFavorablePct, maxAdversePct });
-    }
+      samples.push({
+        symbol: asset.symbol,
+        market: asset.market,
+        type: signal.type,
+        status: "revisit",
+        originTime: signal.originTime,
+        triggerTime: signal.triggerTime,
+        signalTime: signal.triggerTime,
+        entry,
+        originPoint: signal.point,
+        zoneLow: signal.zoneLow,
+        zoneHigh: signal.zoneHigh,
+        triggerOpen: signal.triggerCandle.open,
+        triggerHigh: signal.triggerCandle.high,
+        triggerLow: signal.triggerCandle.low,
+        triggerClose: signal.triggerCandle.close,
+        outcome,
+        barsToOutcome,
+        maxFavorablePct,
+        maxAdversePct,
+      });
   }
   const dedupedSamples = dedupeReversalSignals(samples.map((row) => ({ ...row, touchTime: row.signalTime, distancePct: 0 })));
-  const resolved = dedupedSamples.filter((row) => row.outcome !== "timeout");
-  const supportRows = dedupedSamples.filter((row) => row.type === "support-touch" && row.outcome !== "timeout");
-  const resistanceRows = dedupedSamples.filter((row) => row.type === "resistance-touch" && row.outcome !== "timeout");
+  const resolved = dedupedSamples.filter((row) => !["timeout", "ambiguous"].includes(row.outcome));
+  const supportRows = resolved.filter((row) => row.type === "support-touch");
+  const resistanceRows = resolved.filter((row) => row.type === "resistance-touch");
   const hitRate = (rows) => rows.length ? rows.filter((row) => row.outcome === "successful").length / rows.length : null;
   const avg = (rows, field) => rows.length ? rows.reduce((sum, row) => sum + Number(row[field] || 0), 0) / rows.length : null;
   return {
-    generatedAt: new Date().toISOString(), symbol: asset.symbol, market: asset.market, timeframe: "1D", horizonBars: horizon, targetPct,
+    generatedAt: new Date().toISOString(), symbol: asset.symbol, market: asset.market, anchorTimeframe: "1D", triggerTimeframe: "4h", horizonDays: horizon, targetPct,
     cooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, samples: dedupedSamples.length, resolved: resolved.length, successful: dedupedSamples.filter((row) => row.outcome === "successful").length, invalidated: dedupedSamples.filter((row) => row.outcome === "invalidated").length, timeout: dedupedSamples.filter((row) => row.outcome === "timeout").length,
-    indicatorHitRate: hitRate(resolved), supportHitRate: hitRate(supportRows), resistanceHitRate: hitRate(resistanceRows), winRate: hitRate(resolved), averageBarsToOutcome: avg(resolved, "barsToOutcome"), averageMaxFavorablePct: avg(dedupedSamples, "maxFavorablePct"), averageMaxAdversePct: avg(dedupedSamples, "maxAdversePct"), records: dedupedSamples, recent: dedupedSamples.slice(-20).reverse(),
+    ambiguous: dedupedSamples.filter((row) => row.outcome === "ambiguous").length, indicatorHitRate: hitRate(resolved), supportHitRate: hitRate(supportRows), resistanceHitRate: hitRate(resistanceRows), winRate: hitRate(resolved), averageBarsToOutcome: avg(resolved, "barsToOutcome"), averageMaxFavorablePct: avg(dedupedSamples, "maxFavorablePct"), averageMaxAdversePct: avg(dedupedSamples, "maxAdversePct"), coverage: { dailyCandles: dailyCandles.length, triggerCandles: triggerCandles.length, dailyZones: dailyZones.length, entries: candidates.length }, records: dedupedSamples, recent: dedupedSamples.slice(-20).reverse(),
   };
 }
 
@@ -476,22 +630,23 @@ async function handleReversalStats(req, res) {
     const assets = [...new Map(requestedAssets.map((asset) => [asset.symbol, asset])).values()];
     const results = await mapLimit(assets, 4, async (asset) => {
       try {
-        return buildReversalStats(asset, await getReversalCandles(asset), horizon, targetPct);
+        const [dailyCandles, triggerCandles] = await Promise.all([getReversalCandles(asset), getReversalTriggerCandles(asset)]);
+        return buildReversalStats(asset, dailyCandles, triggerCandles, horizon, targetPct);
       } catch (error) {
         return { symbol: asset.symbol, market: asset.market, error: error.message, samples: 0, records: [] };
       }
     });
     const valid = results.filter((result) => !result.error);
     const records = valid.flatMap((result) => result.records || []).sort((a, b) => a.signalTime - b.signalTime);
-    const resolved = records.filter((row) => row.outcome !== "timeout");
+    const resolved = records.filter((row) => !["timeout", "ambiguous"].includes(row.outcome));
     const successful = records.filter((row) => row.outcome === "successful");
-    const support = records.filter((row) => row.type === "support-touch" && row.outcome !== "timeout");
-    const resistance = records.filter((row) => row.type === "resistance-touch" && row.outcome !== "timeout");
+    const support = resolved.filter((row) => row.type === "support-touch");
+    const resistance = resolved.filter((row) => row.type === "resistance-touch");
     const rate = (rows) => rows.length ? rows.filter((row) => row.outcome === "successful").length / rows.length : null;
     const average = (field) => records.length ? records.reduce((sum, row) => sum + Number(row[field] || 0), 0) / records.length : null;
     return json(res, 200, {
-      generatedAt: new Date().toISOString(), symbol: symbols || "DEFAULT_WATCHLIST", assetsRequested: assets.length, assetsWithData: valid.length, assetsFailed: results.filter((result) => result.error).map((result) => ({ symbol: result.symbol, error: result.error })), timeframe: "1D", horizonBars: horizon, targetPct, cooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS,
-      samples: records.length, resolved: resolved.length, successful: successful.length, invalidated: records.filter((row) => row.outcome === "invalidated").length, timeout: records.filter((row) => row.outcome === "timeout").length, indicatorHitRate: rate(resolved), supportHitRate: rate(support), resistanceHitRate: rate(resistance), averageBarsToOutcome: resolved.length ? resolved.reduce((sum, row) => sum + Number(row.barsToOutcome || 0), 0) / resolved.length : null, averageMaxFavorablePct: average("maxFavorablePct"), averageMaxAdversePct: average("maxAdversePct"), records, recent: records.slice(-20).reverse(),
+      generatedAt: new Date().toISOString(), symbol: symbols || "DEFAULT_WATCHLIST", assetsRequested: assets.length, assetsWithData: valid.length, assetsFailed: results.filter((result) => result.error).map((result) => ({ symbol: result.symbol, error: result.error })), assetsCoverage: valid.map((result) => ({ symbol: result.symbol, ...result.coverage })), anchorTimeframe: "1D", triggerTimeframe: "4h", horizonDays: horizon, targetPct, cooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS,
+      samples: records.length, resolved: resolved.length, successful: successful.length, invalidated: records.filter((row) => row.outcome === "invalidated").length, timeout: records.filter((row) => row.outcome === "timeout").length, ambiguous: records.filter((row) => row.outcome === "ambiguous").length, indicatorHitRate: rate(resolved), supportHitRate: rate(support), resistanceHitRate: rate(resistance), averageBarsToOutcome: resolved.length ? resolved.reduce((sum, row) => sum + Number(row.barsToOutcome || 0), 0) / resolved.length : null, averageMaxFavorablePct: average("maxFavorablePct"), averageMaxAdversePct: average("maxAdversePct"), records, recent: records.slice(-20).reverse(),
     });
   } catch (error) {
     return json(res, 502, { error: error.message });
@@ -505,19 +660,20 @@ async function scanReversalData(requested, selectionMode) {
 
   const rows = await mapLimit(requested, 4, async (asset) => {
     try {
-      const candles = await getReversalCandles(asset);
-      return { ...asset, ...buildReversalSignal(asset, candles), error: null };
+      const [dailyCandles, triggerCandles] = await Promise.all([getReversalCandles(asset), getReversalTriggerCandles(asset)]);
+      return { ...asset, ...buildReversalSignal(asset, dailyCandles, triggerCandles), error: null };
     } catch (error) {
       return { ...asset, status: "error", current: null, signals: [], zones: [], error: error.message };
     }
   });
   const data = {
     generatedAt: new Date().toISOString(),
-    timeframe: "1D",
+    anchorTimeframe: "1D",
+    triggerTimeframe: "4h",
     selectionMode,
-    minimumAgeBars: { stocks: 10, crypto: 14 },
+    minimumAgeBars: 10,
     proximityPct: 1.2,
-    minimumAgeText: "股票 10 个交易日 / 加密资产 14 根日线",
+    minimumAgeText: "日线锚点至少 10 根 K 线",
     rows,
     signals: rows.flatMap((row) => row.signals.map((signal) => ({ ...signal, ...row }))),
   };

@@ -57,7 +57,7 @@ function renderHistory(records) {
     return `<tr>
       <td>${fmtDateTime(record.recordedAt)}</td>
       <td class="symbol">${escapeHtml(record.symbol)}<small>${escapeHtml(record.market)}</small></td>
-      <td class="positive">${approaching ? "接近预警" : "第二次触及"}</td>
+      <td class="positive">${approaching ? "接近预警" : "重新进入"}</td>
       <td>${support ? "支撑 · 潜在反弹" : "阻力 · 潜在回落"}</td>
       <td><b>${fmtPrice(record.current?.price)}</b><small>${fmtPrice(record.zoneLow)} - ${fmtPrice(record.zoneHigh)}</small></td>
     </tr>`;
@@ -90,15 +90,15 @@ async function loadStats() {
     const pct = (value) => Number.isFinite(Number(value)) ? `${(Number(value) * 100).toFixed(1)}%` : "-";
     const num = (value) => Number.isFinite(Number(value)) ? `${Number(value).toFixed(2)}%` : "-";
     els.statsStatus.textContent = `${data.assetsWithData}/${data.assetsRequested} 个标的 · ${data.samples} 个样本 · 已忽略 ${data.cooldownDays} 日内重复信号`;
-    els.statsSummary.innerHTML = [["指标命中", data.successful], ["指标失效", data.invalidated], ["未完成", data.timeout], ["总体命中率", pct(data.indicatorHitRate)], ["支撑命中率", pct(data.supportHitRate)], ["阻力命中率", pct(data.resistanceHitRate)], ["平均有利波动", num(data.averageMaxFavorablePct)], ["平均不利波动", num(data.averageMaxAdversePct)]]
+    els.statsSummary.innerHTML = [["指标命中", data.successful], ["指标失效", data.invalidated], ["待复核", data.ambiguous], ["未完成", data.timeout], ["总体命中率", pct(data.indicatorHitRate)], ["支撑命中率", pct(data.supportHitRate)], ["阻力命中率", pct(data.resistanceHitRate)], ["平均有利波动", num(data.averageMaxFavorablePct)], ["平均不利波动", num(data.averageMaxAdversePct)]]
       .map(([label, value]) => `<div><span>${label}</span><strong>${escapeHtml(value)}</strong></div>`).join("");
     const total = Math.max(1, data.samples);
     els.statsOutcomeBar.innerHTML = [
-      ["成功", data.successful, "isSuccess"], ["失效", data.invalidated, "isFailure"], ["未完成", data.timeout, "isPending"],
+      ["成功", data.successful, "isSuccess"], ["失效", data.invalidated, "isFailure"], ["待复核", data.ambiguous, "isPending"], ["未完成", data.timeout, "isPending"],
     ].map(([label, value, cls]) => `<div class="statsOutcomeSegment ${cls}" style="width:${Number(value) / total * 100}%" title="${label} ${value}"><span>${label}</span><b>${value}</b></div>`).join("");
     els.statsTimeline.innerHTML = (data.recent || []).slice().reverse().map((row) => {
       const cls = row.outcome === "successful" ? "isSuccess" : row.outcome === "invalidated" ? "isFailure" : "isPending";
-      const label = row.outcome === "successful" ? "命中" : row.outcome === "invalidated" ? "失效" : "未完成";
+      const label = row.outcome === "successful" ? "命中" : row.outcome === "invalidated" ? "失效" : row.outcome === "ambiguous" ? "待复核" : "未完成";
       return `<div class="statsTimelineItem ${cls}" title="${fmtDate(row.signalTime)} · ${label} · ${Number(row.maxFavorablePct).toFixed(2)}% 有利波动"><span>${fmtDate(row.signalTime)}</span><b>${label}</b></div>`;
     }).join("");
   } catch (error) {
@@ -120,15 +120,15 @@ function renderSignals(signals) {
     const support = signal.type === "support-touch";
     const approaching = signal.isSecondApproach && !signal.isSecondTouch;
     return `<article class="reversalSignal ${support ? "isSupport" : "isResistance"}">
-      <div class="signalState">${approaching ? "\u63a5\u8fd1\u9884\u8b66" : "\u7b2c\u4e8c\u6b21\u89e6\u53ca"}</div>
+      <div class="signalState">${approaching ? "\u63a5\u8fd1\u9884\u8b66" : "\u91cd\u65b0\u8fdb\u5165"}</div>
       <div class="reversalSignalTop"><span class="signalBadge">${support ? "支撑 · 潜在反弹" : "阻力 · 潜在回落"}</span><strong>${escapeHtml(signal.symbol)}</strong><span class="signalMarket">${escapeHtml(signal.market)}</span></div>
       <div class="reversalSignalGrid">
         <div><span>当前价格</span><b>${fmtPrice(signal.current?.price)}</b></div>
         <div><span>关键区域</span><b>${fmtPrice(signal.zoneLow)} - ${fmtPrice(signal.zoneHigh)}</b></div>
         <div><span>区域年龄</span><b>${signal.ageBars} 根日线</b></div>
-        <div><span>首次触及</span><b>${fmtDate(signal.touchTime)}</b></div>
+        <div><span>4 小时触发</span><b>${fmtDateTime(signal.triggerTime || signal.touchTime)}</b></div>
       </div>
-      <div class="reversalSignalFoot">区域起点 ${fmtDate(signal.originTime)} · 距离区域 ${Number(signal.distancePct).toFixed(2)}% · 仅提醒，不自动交易</div>
+      <div class="reversalSignalFoot">日线锚点 ${fmtDate(signal.originTime)} · 触发价 ${fmtPrice(signal.triggerPrice)} · 距离区域 ${Number(signal.distancePct).toFixed(2)}%</div>
     </article>`;
   }).join("");
 }
@@ -139,12 +139,12 @@ function renderWatch(rows) {
     return;
   }
   els.watchBody.innerHTML = rows.map((row) => {
-    const firstTouch = row.status === "second-touch" || row.status === "approaching";
+    const firstTouch = ["revisit", "second-touch", "approaching"].includes(row.status);
     const zone = row.zones?.[0];
     return `<tr>
       <td class="symbol">${escapeHtml(row.symbol)}</td>
       <td>${escapeHtml(row.market)}</td>
-      <td class="${firstTouch ? "positive" : ""}">${firstTouch ? (row.status === "approaching" ? "接近预警" : "第二次触及") : row.status === "error" ? "读取失败" : "观察中"}</td>
+      <td class="${firstTouch ? "positive" : ""}">${firstTouch ? (row.status === "approaching" ? "接近预警" : "重新进入") : row.status === "error" ? "读取失败" : "观察中"}</td>
       <td>${fmtPrice(row.current?.price)}</td>
       <td>${zone ? `${fmtPrice(zone.zoneLow)} - ${fmtPrice(zone.zoneHigh)}` : "-"}</td>
       <td>${zone ? `${zone.ageBars} 根` : "-"}</td>
@@ -166,7 +166,7 @@ async function scan() {
     els.signalCount.textContent = data.signals.length;
     els.watchCount.textContent = data.rows.length;
     els.updated.textContent = new Date(data.generatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-    els.status.textContent = `${data.selectionMode === "24h-quote-volume" ? "24h成交额自动选取" : "手动观察池"} / 1D / ${data.minimumAgeText} / second revisit + ${data.proximityPct}% proximity warning`;
+    els.status.textContent = `${data.selectionMode === "24h-quote-volume" ? "24h成交额自动选取" : "手动观察池"} / 日线锚点 / 4 小时触发 / ${data.minimumAgeText}`;
     renderSignals(data.signals);
     renderWatch(data.rows);
     await loadHistory();
@@ -184,9 +184,9 @@ els.refreshBtn.addEventListener("click", scan);
 els.statsBtn.addEventListener("click", loadStats);
 els.exportStatsBtn.addEventListener("click", () => {
   if (!latestStats?.records?.length) return;
-  const headers = ["symbol", "type", "status", "signalTime", "entry", "zoneLow", "zoneHigh", "outcome", "barsToOutcome", "maxFavorablePct", "maxAdversePct"];
+  const headers = ["symbol", "market", "type", "status", "originTime", "originPoint", "triggerTime", "entry", "zoneLow", "zoneHigh", "triggerOpen", "triggerHigh", "triggerLow", "triggerClose", "outcome", "barsToOutcome", "maxFavorablePct", "maxAdversePct"];
   const lines = [headers.join(","), ...latestStats.records.map((row) => headers.map((key) => {
-    const value = key === "signalTime" ? new Date(row[key]).toISOString() : row[key] ?? "";
+    const value = ["originTime", "triggerTime"].includes(key) && row[key] ? new Date(row[key]).toISOString() : row[key] ?? "";
     return `"${String(value).replaceAll('"', '""')}"`;
   }).join(","))];
   const blob = new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8" });

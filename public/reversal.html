@@ -26,7 +26,7 @@
         <div>
           <div class="pageEyebrow">DAILY REVISIT RADAR / 日线区域</div>
           <h1>关键区域提醒</h1>
-          <p>寻找趋势结束后的历史支撑或阻力区域，第一次回踩后在第二次确认时提醒人工判断。</p>
+          <p>日线确定历史支撑或阻力区域，4 小时价格重新进入区域时提醒人工判断。</p>
         </div>
         <div class="actions">
           <a class="linkBtn" href="/">返回总览</a>
@@ -39,18 +39,18 @@
           观察标的
           <input id="symbols" type="text" value="" placeholder="留空：港股 + 贵金属 + 币安合约成交额前列" />
         </label>
-        <div class="reversalRule"><span class="ruleDot"></span><span>日线 · 最短 2 周 · 第二次确认 + 接近预警</span></div>
+        <div class="reversalRule"><span class="ruleDot"></span><span>日线锚点 · 4 小时触发 · 重新进入 + 接近预警</span></div>
       </section>
 
       <section class="stats reversalStats" aria-label="扫描概览">
-        <div><span>首次触及</span><strong id="signalCount">-</strong></div>
+        <div><span>当前触发</span><strong id="signalCount">-</strong></div>
         <div><span>观察标的</span><strong id="watchCount">-</strong></div>
         <div><span>更新时间</span><strong id="updated">-</strong></div>
       </section>
 
       <section class="panel reversalSignalPanel">
         <div class="panelHead">
-          <div><h2>日线信号提醒</h2><p id="status">等待扫描 · 自动检查间隔 2 小时</p></div>
+          <div><h2>关键区域信号</h2><p id="status">等待扫描 · 自动检查间隔 2 小时</p></div>
           <span class="macroSource">人工判断 · 不自动交易</span>
         </div>
         <div id="signalList" class="reversalSignalList"></div>
@@ -62,12 +62,12 @@
       </section>
 
       <section class="panel reversalWatchPanel reversalHistoryPanel">
-        <div class="panelHead"><div><h2>信号记录</h2><p>服务器会保存接近预警和第二次触及，避免信号只出现一天后丢失。</p></div><span id="historyStatus" class="macroSource">读取中</span></div>
+        <div class="panelHead"><div><h2>信号记录</h2><p>服务器保存接近预警和 4 小时重新进入区域的信号。</p></div><span id="historyStatus" class="macroSource">读取中</span></div>
         <div class="tableWrap"><table class="reversalTable"><thead><tr><th>记录时间</th><th>标的</th><th>状态</th><th>方向</th><th>触发价 / 区域</th></tr></thead><tbody id="historyBody"></tbody></table></div>
       </section>
 
       <section class="panel reversalStatsPanel">
-        <div class="panelHead"><div><h2>指标命中率统计</h2><p>按当前规则逐日回放，判断预测方向是否先于区域失效出现，不等同于收益率。</p></div><span id="statsStatus" class="macroSource">未计算</span></div>
+        <div class="panelHead"><div><h2>指标命中率统计</h2><p>日线生成区域，4 小时回放实际触发；同根 K 线无法确定先后时列为待复核。</p></div><span id="statsStatus" class="macroSource">未计算</span></div>
         <div class="reversalStatsForm">
           <div class="statsScope"><span>统计范围</span><strong>全部观察标的</strong><small>港股、贵金属、美股合约及成交额前列的币安合约</small></div>
           <label>观察天数<input id="statsHorizon" type="number" min="3" max="30" value="10" /></label>

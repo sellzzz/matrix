@@ -139,16 +139,16 @@ function buildReversalMessage(records) {
   const header = [
     "<b>Daily Key Zone Signals</b>",
     `New records: ${records.length}`,
-    "Timeframe: 1D | Manual decision only",
+    "Anchor: 1D | Trigger: 4h | Manual decision only",
   ].join("\n");
   const rows = records.slice(0, 10).map((row, index) => {
     const support = row.type === "support-touch";
-    const state = row.status === "approaching" ? "Approaching alert" : "Second revisit";
+    const state = row.status === "approaching" ? "Approaching alert" : "Zone re-entry";
     return [
       `${index + 1}. <b>${htmlEscape(row.symbol || "-")}</b> · ${state}`,
       `${support ? "Support / potential rebound" : "Resistance / potential pullback"}`,
-      `Price ${fmtPrice(row.current?.price)} | Zone ${fmtPrice(row.zoneLow)} - ${fmtPrice(row.zoneHigh)}`,
-      `Recorded ${fmtTime(row.recordedAt)} | Age ${row.ageBars ?? "-"} daily bars`,
+      `Price ${fmtPrice(row.triggerPrice ?? row.current?.price)} | Zone ${fmtPrice(row.zoneLow)} - ${fmtPrice(row.zoneHigh)}`,
+      `Anchor ${fmtTime(row.originTime)} | Trigger ${fmtTime(row.triggerTime ?? row.touchTime)}`,
     ].join("\n");
   });
   return `${header}\n\n${rows.join("\n\n")}`;
