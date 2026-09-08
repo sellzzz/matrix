@@ -19,6 +19,8 @@ let scanCache = new Map();
 let pancakeRangeCache = new Map();
 let reversalCache = new Map();
 let reversalHistory = null;
+const REVERSAL_MIN_AGE_DAYS = 14;
+const REVERSAL_MIN_AGE_MS = REVERSAL_MIN_AGE_DAYS * 24 * 60 * 60 * 1000;
 let vixCache = { at: 0, data: null };
 let dxyCache = { at: 0, data: null };
 let treasuryCurveCache = { at: 0, data: null };
@@ -415,7 +417,6 @@ function isValidEntry(candle, previous, zone, side) {
 }
 
 function buildDailyZones(asset, candles) {
-  const minAgeBars = 10;
   const zones = [];
   for (const side of ["support", "resistance"]) {
     for (let index = 2; index <= candles.length - 3; index += 1) {
@@ -435,7 +436,7 @@ function buildDailyZones(asset, candles) {
         point,
         originTime: candles[index].timestamp,
         confirmedTime: candles[index + 2].timestamp,
-        eligibleTime: candles[Math.min(candles.length - 1, index + minAgeBars)]?.timestamp ?? Infinity,
+        eligibleTime: candles[index].timestamp + REVERSAL_MIN_AGE_MS,
         originIndex: index,
       });
     }
@@ -490,6 +491,7 @@ function buildReversalSignal(asset, dailyCandles, triggerCandles) {
         triggerPrice: zone.side === "support" ? zone.zoneHigh : zone.zoneLow,
         triggerCandle: { open: current.open, high: current.high, low: current.low, close: current.close },
         ageBars: dailyCandles.filter((candle) => candle.timestamp > zone.originTime && candle.timestamp <= current.timestamp).length,
+        ageDays: Math.floor((current.timestamp - zone.originTime) / (24 * 60 * 60 * 1000)),
         distancePct: Math.abs(distance),
         wickSize: zone.side === "support" ? current.low : current.high,
         isTouching,
@@ -525,16 +527,24 @@ async function loadReversalHistory() {
   return reversalHistory;
 }
 
+function isEligibleReversalRecord(record) {
+  const originTime = Number(record?.originTime);
+  const triggerTime = Number(record?.triggerTime ?? record?.touchTime);
+  if (!Number.isFinite(originTime) || !Number.isFinite(triggerTime)) return true;
+  return triggerTime - originTime >= REVERSAL_MIN_AGE_MS;
+}
+
 function reversalHistoryKey(signal) {
   const state = signal.isSecondTouch ? "revisit" : "approaching";
   return [signal.symbol, signal.type, state, signal.originTime, signal.touchTime].join(":");
 }
 
 async function recordReversalSignals(signals) {
-  if (!signals.length) return loadReversalHistory();
+  const eligibleSignals = signals.filter(isEligibleReversalRecord);
+  if (!eligibleSignals.length) return (await loadReversalHistory()).filter(isEligibleReversalRecord);
   const history = await loadReversalHistory();
   const known = new Set(history.map(reversalHistoryKey));
-  const additions = signals
+  const additions = eligibleSignals
     .map((signal) => ({
       ...signal,
       recordKey: reversalHistoryKey(signal),
@@ -544,18 +554,19 @@ async function recordReversalSignals(signals) {
       signals: undefined,
     }))
     .filter((signal) => !known.has(signal.recordKey));
-  if (!additions.length) return history;
+  if (!additions.length) return history.filter(isEligibleReversalRecord);
   history.unshift(...additions);
   reversalHistory = history.slice(0, REVERSAL_HISTORY_LIMIT);
   await reversalStore.save(reversalHistory);
-  return reversalHistory;
+  return reversalHistory.filter(isEligibleReversalRecord);
 }
 
 async function handleReversalHistory(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const limit = parseInteger(url.searchParams.get("limit"), 100, 1, 500);
   const history = await loadReversalHistory();
-  json(res, 200, { generatedAt: new Date().toISOString(), records: history.slice(0, limit) });
+  const records = history.filter(isEligibleReversalRecord).slice(0, limit);
+  json(res, 200, { generatedAt: new Date().toISOString(), records });
 }
 
 function buildReversalStats(asset, dailyCandles, triggerCandles, horizon, targetPct) {
@@ -696,9 +707,9 @@ async function scanReversalData(requested, selectionMode) {
     anchorTimeframe: "1D",
     triggerTimeframe: "4h",
     selectionMode,
-    minimumAgeBars: 10,
+    minimumAgeDays: REVERSAL_MIN_AGE_DAYS,
     proximityPct: 1.2,
-    minimumAgeText: "日线锚点至少 10 根 K 线",
+    minimumAgeText: `日线区域至少形成 ${REVERSAL_MIN_AGE_DAYS} 天`,
     rows,
     signals: rows.flatMap((row) => row.signals.map((signal) => ({ ...signal, ...row }))),
   };

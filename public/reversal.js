@@ -142,7 +142,7 @@ function renderSignals(signals) {
       <div class="reversalSignalGrid">
         <div><span>当前价格</span><b>${fmtPrice(signal.current?.price)}</b></div>
         <div><span>关键区域</span><b>${fmtPrice(signal.zoneLow)} - ${fmtPrice(signal.zoneHigh)}</b></div>
-        <div><span>区域年龄</span><b>${signal.ageBars} 根日线</b></div>
+        <div><span>区域年龄</span><b>${signal.ageDays ?? signal.ageBars} ${signal.ageDays != null ? "天" : "根日线"}</b></div>
         <div><span>4 小时触发</span><b>${fmtDateTime(signal.triggerTime || signal.touchTime)}</b></div>
       </div>
       <div class="reversalSignalFoot">日线锚点 ${fmtDate(signal.originTime)} · 触发价 ${fmtPrice(signal.triggerPrice)} · 距离区域 ${Number(signal.distancePct).toFixed(2)}%</div>
@@ -164,7 +164,7 @@ function renderWatch(rows) {
       <td class="${firstTouch ? "positive" : ""}">${firstTouch ? (row.status === "approaching" ? "接近预警" : "重新进入") : row.status === "error" ? "读取失败" : "观察中"}</td>
       <td>${fmtPrice(row.current?.price)}</td>
       <td>${zone ? `${fmtPrice(zone.zoneLow)} - ${fmtPrice(zone.zoneHigh)}` : "-"}</td>
-      <td>${zone ? `${zone.ageBars} 根` : "-"}</td>
+      <td>${zone ? `${zone.ageDays ?? zone.ageBars} ${zone.ageDays != null ? "天" : "根"}` : "-"}</td>
       <td>${escapeHtml(row.error || "-")}</td>
     </tr>`;
   }).join("");
