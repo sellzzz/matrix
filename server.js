@@ -7,7 +7,7 @@ import { config } from "./src/config.js";
 import { createJsonStore } from "./src/json-store.js";
 import { createRouter } from "./src/router.js";
 
-const { port: PORT, publicDir: PUBLIC_DIR, binanceFapi: BINANCE_FAPI, coingeckoApi: COINGECKO_API, dexscreenerApi: DEXSCREENER_API, bscRpc: BSC_RPC, cacheMs: CACHE_MS, macroCacheMs: MACRO_CACHE_MS, fetchTimeoutMs: FETCH_TIMEOUT_MS, maxScanCache: MAX_SCAN_CACHE, reversalCacheMs: REVERSAL_CACHE_MS, reversalHistoryFile: REVERSAL_HISTORY_FILE, reversalHistoryLimit: REVERSAL_HISTORY_LIMIT, onchainAlertsFile: ONCHAIN_ALERTS_FILE, onchainAlertLimit: ONCHAIN_ALERT_LIMIT, onchainPriceCacheMs: ONCHAIN_PRICE_CACHE_MS, onchainCheckConcurrency: ONCHAIN_CHECK_CONCURRENCY, reversalSignalCooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, fredApi: FRED_API, treasuryCurveCsv: TREASURY_CURVE_CSV, cmeFedwatchApi: CME_FEDWATCH_API, concurrency: CONCURRENCY } = config;
+const { port: PORT, publicDir: PUBLIC_DIR, binanceFapi: BINANCE_FAPI, coingeckoApi: COINGECKO_API, dexscreenerApi: DEXSCREENER_API, bscRpc: BSC_RPC, cacheMs: CACHE_MS, macroCacheMs: MACRO_CACHE_MS, fetchTimeoutMs: FETCH_TIMEOUT_MS, maxScanCache: MAX_SCAN_CACHE, reversalCacheMs: REVERSAL_CACHE_MS, reversalTopFutures: REVERSAL_TOP_FUTURES, reversalMaxAssets: REVERSAL_MAX_ASSETS, reversalHistoryFile: REVERSAL_HISTORY_FILE, reversalHistoryLimit: REVERSAL_HISTORY_LIMIT, onchainAlertsFile: ONCHAIN_ALERTS_FILE, onchainAlertLimit: ONCHAIN_ALERT_LIMIT, onchainPriceCacheMs: ONCHAIN_PRICE_CACHE_MS, onchainCheckConcurrency: ONCHAIN_CHECK_CONCURRENCY, reversalSignalCooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, fredApi: FRED_API, treasuryCurveCsv: TREASURY_CURVE_CSV, cmeFedwatchApi: CME_FEDWATCH_API, concurrency: CONCURRENCY } = config;
 
 let symbolsCache = { at: 0, data: [] };
 let marketCapCache = { at: 0, data: new Map() };
@@ -18,6 +18,7 @@ let pancakeV3PoolCache = new Map();
 let scanCache = new Map();
 let pancakeRangeCache = new Map();
 let reversalCache = new Map();
+let reversalCandleCache = new Map();
 let reversalHistory = null;
 const REVERSAL_MIN_AGE_DAYS = 14;
 const REVERSAL_MIN_AGE_MS = REVERSAL_MIN_AGE_DAYS * 24 * 60 * 60 * 1000;
@@ -259,7 +260,7 @@ function resolveReversalAsset(value) {
   return withTradingView({ symbol: raw, name: raw, market: "币安合约", source: "binance", sourceSymbol: raw });
 }
 
-async function getTopReversalFutures(limit = 30) {
+async function getTopReversalFutures(limit = REVERSAL_TOP_FUTURES) {
   const response = await fetchWithTimeout("https://fapi.binance.com/fapi/v1/ticker/24hr", { timeoutMs: 15_000 });
   if (!response.ok) throw new Error(`Binance 24h ticker ${response.status}`);
   const tickers = await response.json();
@@ -274,7 +275,8 @@ async function getDefaultReversalAssets() {
   const fixedSymbols = ["1810.HK", "0700.HK", "9988.HK", "3690.HK", "9618.HK", "9999.HK", "2318.HK", "0941.HK", "0388.HK", "0005.HK", "XAUUSD", "XAGUSD", "AAPLUSDT", "AMZNUSDT", "TSLAUSDT", "NVDAUSDT", "MSFTUSDT", "METAUSDT", "GOOGLUSDT", "MSTRUSDT", "COINUSDT", "HOODUSDT", "PLTRUSDT", "CRCLUSDT", "AMDUSDT", "AVGOUSDT", "QCOMUSDT", "INTCUSDT", "ORCLUSDT", "NFLXUSDT", "DISUSDT", "WMTUSDT", "COSTUSDT", "LLYUSDT", "CVXUSDT", "BABAUSDT", "SPYUSDT", "QQQUSDT", "TQQQUSDT", "SNXXUSDT"];
   const fixed = fixedSymbols.map(resolveReversalAsset).filter(Boolean);
   try {
-    return [...fixed, ...(await getTopReversalFutures(20))].slice(0, 60);
+    const combined = [...fixed, ...(await getTopReversalFutures())];
+    return [...new Map(combined.map((asset) => [asset.symbol, asset])).values()].slice(0, REVERSAL_MAX_ASSETS);
   } catch {
     return fixed;
   }
@@ -379,6 +381,19 @@ async function getReversalTriggerCandles(asset) {
   }
   const unique = [...new Map(pages.map((row) => [Number(row[0]), row])).values()];
   return unique.map(normalizeKline).filter(isValidCandle);
+}
+
+async function getCachedReversalCandles(asset, timeframe) {
+  const key = `${asset.source}:${asset.sourceSymbol}:${timeframe}`;
+  const cached = reversalCandleCache.get(key);
+  if (cached && Date.now() - cached.at < REVERSAL_CACHE_MS) return cached.promise;
+  const promise = (timeframe === "1d" ? getReversalCandles(asset) : getReversalTriggerCandles(asset))
+    .catch((error) => {
+      reversalCandleCache.delete(key);
+      throw error;
+    });
+  reversalCandleCache.set(key, { at: Date.now(), promise });
+  return promise;
 }
 
 function averageRange(candles, index) {
@@ -673,12 +688,12 @@ async function handleReversalStats(req, res) {
   const targetPct = parseNumber(url.searchParams.get("targetPct"), 5, 0.5, 50);
   try {
     const requestedAssets = symbols
-      ? symbols.split(",").map(resolveReversalAsset).filter(Boolean).slice(0, 80)
+      ? symbols.split(",").map(resolveReversalAsset).filter(Boolean).slice(0, REVERSAL_MAX_ASSETS)
       : await getDefaultReversalAssets();
     const assets = [...new Map(requestedAssets.map((asset) => [asset.symbol, asset])).values()];
     const results = await mapLimit(assets, 4, async (asset) => {
       try {
-        const [dailyCandles, triggerCandles] = await Promise.all([getReversalCandles(asset), getReversalTriggerCandles(asset)]);
+        const [dailyCandles, triggerCandles] = await Promise.all([getCachedReversalCandles(asset, "1d"), getCachedReversalCandles(asset, "4h")]);
         return buildReversalStats(asset, dailyCandles, triggerCandles, horizon, targetPct);
       } catch (error) {
         return { symbol: asset.symbol, market: asset.market, error: error.message, samples: 0, records: [] };
@@ -708,7 +723,7 @@ async function scanReversalData(requested, selectionMode) {
 
   const rows = await mapLimit(requested, 4, async (asset) => {
     try {
-      const [dailyCandles, triggerCandles] = await Promise.all([getReversalCandles(asset), getReversalTriggerCandles(asset)]);
+      const [dailyCandles, triggerCandles] = await Promise.all([getCachedReversalCandles(asset, "1d"), getCachedReversalCandles(asset, "4h")]);
       return { ...asset, ...buildReversalSignal(asset, dailyCandles, triggerCandles), error: null };
     } catch (error) {
       return { ...asset, status: "error", current: null, signals: [], zones: [], error: error.message };
@@ -741,7 +756,7 @@ async function handleReversalScan(req, res) {
   const symbols = url.searchParams.get("symbols")?.trim();
   try {
     const requested = symbols
-      ? symbols.split(",").map(resolveReversalAsset).filter(Boolean).slice(0, 40)
+      ? symbols.split(",").map(resolveReversalAsset).filter(Boolean).slice(0, REVERSAL_MAX_ASSETS)
       : await getDefaultReversalAssets();
     const data = await scanReversalData(requested, symbols ? "manual" : "24h-quote-volume");
     json(res, 200, data);

@@ -15,6 +15,8 @@ export const config = Object.freeze({
   fetchTimeoutMs: 15_000,
   maxScanCache: 60,
   reversalCacheMs: 5 * 60_000,
+  reversalTopFutures: Math.min(120, Math.max(20, Number(process.env.REVERSAL_TOP_FUTURES || 40))),
+  reversalMaxAssets: Math.min(200, Math.max(40, Number(process.env.REVERSAL_MAX_ASSETS || 80))),
   reversalHistoryFile: join(dataDir, "reversal-signals.json"),
   reversalHistoryLimit: 500,
   onchainAlertsFile: join(dataDir, "onchain-alerts.json"),

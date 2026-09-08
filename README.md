@@ -100,6 +100,8 @@ http://服务器IP:8787/smallcap.html
 ## 环境变量
 
 - `PORT`: 服务端口，默认 `8787`
+- `REVERSAL_TOP_FUTURES`: 关键区域模块按 24 小时成交额选择的币安合约数量，默认 `40`
+- `REVERSAL_MAX_ASSETS`: 关键区域模块单次扫描的标的上限，默认 `80`
 - `BSC_RPC`: RPC endpoint，默认 `https://bsc-dataseed.binance.org`
 - `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`: 如服务器需要代理访问外部接口，可设置代理
 - `CME_FEDWATCH_API_URL`: 可选，覆盖 FedWatch API 地址
