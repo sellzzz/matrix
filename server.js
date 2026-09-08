@@ -349,9 +349,9 @@ function aggregateFourHourCandles(rows) {
   });
 }
 
-async function getReversalTriggerCandles(asset) {
+async function getReversalTriggerCandles(asset, mode = "live") {
   if (asset.source === "yahoo") {
-    const chart = await yahooChart(asset.sourceSymbol, { range: "1y", interval: "1h" });
+    const chart = await yahooChart(asset.sourceSymbol, { range: mode === "stats" ? "1y" : "3mo", interval: "1h" });
     const timestamps = chart.timestamp || [];
     const quote = chart.indicators?.quote?.[0] || {};
     const hourly = timestamps.map((timestamp, index) => ({
@@ -363,6 +363,11 @@ async function getReversalTriggerCandles(asset) {
       volume: Number(quote.volume?.[index]),
     })).filter(isValidCandle);
     return aggregateFourHourCandles(hourly);
+  }
+
+  if (mode === "live") {
+    const rows = await binance(`/fapi/v1/klines?symbol=${encodeURIComponent(asset.sourceSymbol)}&interval=4h&limit=500`);
+    return (Array.isArray(rows) ? rows : []).map(normalizeKline).filter(isValidCandle);
   }
 
   const intervalMs = 4 * 60 * 60 * 1000;
@@ -387,7 +392,9 @@ async function getCachedReversalCandles(asset, timeframe) {
   const key = `${asset.source}:${asset.sourceSymbol}:${timeframe}`;
   const cached = reversalCandleCache.get(key);
   if (cached && Date.now() - cached.at < REVERSAL_CACHE_MS) return cached.promise;
-  const promise = (timeframe === "1d" ? getReversalCandles(asset) : getReversalTriggerCandles(asset))
+  const promise = (timeframe === "1d"
+    ? getReversalCandles(asset)
+    : getReversalTriggerCandles(asset, timeframe === "4h-stats" ? "stats" : "live"))
     .catch((error) => {
       reversalCandleCache.delete(key);
       throw error;
@@ -498,7 +505,12 @@ function buildReversalSignal(asset, dailyCandles, triggerCandles) {
   for (const zone of buildDailyZones(asset, dailyCandles)) {
       if (current.timestamp < zone.eligibleTime) continue;
       const entries = findZoneEntries(triggerCandles.slice(0, -1), zone);
-      const hasPriorEntry = entries.length > 0;
+      const triggerHistoryStart = triggerCandles[0]?.timestamp ?? current.timestamp;
+      const hasOlderDailyTouch = dailyCandles.some((candle) =>
+        candle.timestamp >= zone.eligibleTime
+        && candle.timestamp < triggerHistoryStart
+        && touchesZone(candle, zone));
+      const hasPriorEntry = hasOlderDailyTouch || entries.length > 0;
       const isTouching = isValidEntry(current, previous, zone, zone.side) && !hasPriorEntry;
       const distance = current.close < zone.zoneLow
         ? ((zone.zoneLow - current.close) / current.close) * 100
@@ -693,7 +705,7 @@ async function handleReversalStats(req, res) {
     const assets = [...new Map(requestedAssets.map((asset) => [asset.symbol, asset])).values()];
     const results = await mapLimit(assets, 4, async (asset) => {
       try {
-        const [dailyCandles, triggerCandles] = await Promise.all([getCachedReversalCandles(asset, "1d"), getCachedReversalCandles(asset, "4h")]);
+        const [dailyCandles, triggerCandles] = await Promise.all([getCachedReversalCandles(asset, "1d"), getCachedReversalCandles(asset, "4h-stats")]);
         return buildReversalStats(asset, dailyCandles, triggerCandles, horizon, targetPct);
       } catch (error) {
         return { symbol: asset.symbol, market: asset.market, error: error.message, samples: 0, records: [] };
@@ -723,7 +735,7 @@ async function scanReversalData(requested, selectionMode) {
 
   const rows = await mapLimit(requested, 4, async (asset) => {
     try {
-      const [dailyCandles, triggerCandles] = await Promise.all([getCachedReversalCandles(asset, "1d"), getCachedReversalCandles(asset, "4h")]);
+      const [dailyCandles, triggerCandles] = await Promise.all([getCachedReversalCandles(asset, "1d"), getCachedReversalCandles(asset, "4h-live")]);
       return { ...asset, ...buildReversalSignal(asset, dailyCandles, triggerCandles), error: null };
     } catch (error) {
       return { ...asset, status: "error", current: null, signals: [], zones: [], error: error.message };
