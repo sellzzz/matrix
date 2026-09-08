@@ -183,7 +183,7 @@ async function scan() {
     els.signalCount.textContent = data.signals.length;
     els.watchCount.textContent = data.rows.length;
     els.updated.textContent = new Date(data.generatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-    els.status.textContent = `${data.selectionMode === "24h-quote-volume" ? "24h成交额自动选取" : "手动观察池"} / 日线锚点 / 4 小时触发 / ${data.minimumAgeText}`;
+    els.status.textContent = `${data.selectionMode === "24h-quote-volume" ? "币安 USDT 永续自动观察池" : "手动观察池"} / 日线锚点 / 4 小时触发 / ${data.minimumAgeText}`;
     renderSignals(data.signals);
     renderWatch(data.rows);
     await loadHistory();

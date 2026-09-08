@@ -19,6 +19,7 @@ let scanCache = new Map();
 let pancakeRangeCache = new Map();
 let reversalCache = new Map();
 let reversalCandleCache = new Map();
+let binanceRateState = { used: 0, blockedUntil: 0 };
 let reversalHistory = null;
 const REVERSAL_MIN_AGE_DAYS = 14;
 const REVERSAL_MIN_AGE_MS = REVERSAL_MIN_AGE_DAYS * 24 * 60 * 60 * 1000;
@@ -92,15 +93,40 @@ async function readJsonBody(req) {
   return body ? JSON.parse(body) : {};
 }
 
+function nextRateWindow() {
+  const now = Date.now();
+  return now + (60_000 - (now % 60_000)) + 250;
+}
+
+async function waitForBinanceBudget() {
+  const now = Date.now();
+  if (now >= binanceRateState.blockedUntil && binanceRateState.used < 1800) return;
+  const waitMs = Math.max(0, binanceRateState.blockedUntil - now);
+  if (waitMs > 0) await new Promise((resolveWait) => setTimeout(resolveWait, waitMs));
+  binanceRateState = { used: 0, blockedUntil: 0 };
+}
+
 async function binance(path) {
-  const response = await fetchWithTimeout(`${BINANCE_FAPI}${path}`, {
-    headers: { "user-agent": "oi-dashboard/1.0" },
-  });
-  if (!response.ok) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    await waitForBinanceBudget();
+    const response = await fetchWithTimeout(`${BINANCE_FAPI}${path}`, {
+      headers: { "user-agent": "oi-dashboard/1.0" },
+    });
+    const usedWeight = Number(response.headers.get("x-mbx-used-weight-1m"));
+    if (Number.isFinite(usedWeight)) {
+      binanceRateState.used = Math.max(binanceRateState.used, usedWeight);
+      if (usedWeight >= 1800) binanceRateState.blockedUntil = nextRateWindow();
+    }
+    if (response.ok) return response.json();
+    if (response.status === 429 && attempt === 0) {
+      const retryAfter = Number(response.headers.get("retry-after"));
+      binanceRateState.blockedUntil = Math.max(nextRateWindow(), Date.now() + (Number.isFinite(retryAfter) ? retryAfter * 1000 : 0));
+      continue;
+    }
     const text = await response.text().catch(() => "");
     throw new Error(`Binance ${response.status}: ${text.slice(0, 180)}`);
   }
-  return response.json();
+  throw new Error("Binance request throttled");
 }
 
 async function coingecko(path) {
@@ -261,22 +287,30 @@ function resolveReversalAsset(value) {
 }
 
 async function getTopReversalFutures(limit = REVERSAL_TOP_FUTURES) {
-  const response = await fetchWithTimeout("https://fapi.binance.com/fapi/v1/ticker/24hr", { timeoutMs: 15_000 });
-  if (!response.ok) throw new Error(`Binance 24h ticker ${response.status}`);
-  const tickers = await response.json();
+  const tickers = await binance("/fapi/v1/ticker/24hr");
   return tickers
     .filter((ticker) => ticker.symbol?.endsWith("USDT") && !ticker.symbol.includes("_") && Number(ticker.quoteVolume) > 0)
     .sort((a, b) => Number(b.quoteVolume) - Number(a.quoteVolume))
     .slice(0, limit)
-    .map((ticker) => resolveReversalAsset(ticker.symbol));
+    .map((ticker) => ({
+      ...resolveReversalAsset(ticker.symbol),
+      tickerPrice: Number(ticker.lastPrice),
+      quoteVolume24h: Number(ticker.quoteVolume),
+    }));
 }
 
 async function getDefaultReversalAssets() {
   const fixedSymbols = ["1810.HK", "0700.HK", "9988.HK", "3690.HK", "9618.HK", "9999.HK", "2318.HK", "0941.HK", "0388.HK", "0005.HK", "XAUUSD", "XAGUSD", "AAPLUSDT", "AMZNUSDT", "TSLAUSDT", "NVDAUSDT", "MSFTUSDT", "METAUSDT", "GOOGLUSDT", "MSTRUSDT", "COINUSDT", "HOODUSDT", "PLTRUSDT", "CRCLUSDT", "AMDUSDT", "AVGOUSDT", "QCOMUSDT", "INTCUSDT", "ORCLUSDT", "NFLXUSDT", "DISUSDT", "WMTUSDT", "COSTUSDT", "LLYUSDT", "CVXUSDT", "BABAUSDT", "SPYUSDT", "QQQUSDT", "TQQQUSDT", "SNXXUSDT"];
   const fixed = fixedSymbols.map(resolveReversalAsset).filter(Boolean);
   try {
-    const combined = [...fixed, ...(await getTopReversalFutures())];
-    return [...new Map(combined.map((asset) => [asset.symbol, asset])).values()].slice(0, REVERSAL_MAX_ASSETS);
+    const dynamic = await getTopReversalFutures();
+    const dynamicBySymbol = new Map(dynamic.map((asset) => [asset.symbol, asset]));
+    const enrichedFixed = fixed.map((asset) => {
+      const live = dynamicBySymbol.get(asset.symbol);
+      return live ? { ...live, ...asset, tickerPrice: live.tickerPrice, quoteVolume24h: live.quoteVolume24h } : asset;
+    });
+    const fixedSet = new Set(fixed.map((asset) => asset.symbol));
+    return [...enrichedFixed, ...dynamic.filter((asset) => !fixedSet.has(asset.symbol))].slice(0, REVERSAL_MAX_ASSETS);
   } catch {
     return fixed;
   }
@@ -366,7 +400,7 @@ async function getReversalTriggerCandles(asset, mode = "live") {
   }
 
   if (mode === "live") {
-    const rows = await binance(`/fapi/v1/klines?symbol=${encodeURIComponent(asset.sourceSymbol)}&interval=4h&limit=500`);
+    const rows = await binance(`/fapi/v1/klines?symbol=${encodeURIComponent(asset.sourceSymbol)}&interval=4h&limit=499`);
     return (Array.isArray(rows) ? rows : []).map(normalizeKline).filter(isValidCandle);
   }
 
@@ -389,6 +423,7 @@ async function getReversalTriggerCandles(asset, mode = "live") {
 }
 
 async function getCachedReversalCandles(asset, timeframe) {
+  if (timeframe === "4h-stats") return getReversalTriggerCandles(asset, "stats");
   const key = `${asset.source}:${asset.sourceSymbol}:${timeframe}`;
   const cached = reversalCandleCache.get(key);
   if (cached && Date.now() - cached.at < REVERSAL_CACHE_MS) return cached.promise;
@@ -401,6 +436,13 @@ async function getCachedReversalCandles(asset, timeframe) {
     });
   reversalCandleCache.set(key, { at: Date.now(), promise });
   return promise;
+}
+
+function pruneReversalCandleCache() {
+  const cutoff = Date.now() - REVERSAL_CACHE_MS;
+  for (const [key, cached] of reversalCandleCache) {
+    if (cached.at < cutoff) reversalCandleCache.delete(key);
+  }
 }
 
 function averageRange(candles, index) {
@@ -486,6 +528,24 @@ function findZoneEntries(triggerCandles, zone) {
   return entries;
 }
 
+function zoneDistancePct(price, zone) {
+  if (price < zone.zoneLow) return ((zone.zoneLow - price) / price) * 100;
+  if (price > zone.zoneHigh) return ((price - zone.zoneHigh) / price) * 100;
+  return 0;
+}
+
+function needsFourHourScan(dailyCandles, price, now = Date.now()) {
+  if (!Number.isFinite(price) || price <= 0) return true;
+  const oldHistoryCutoff = now - 84 * 24 * 60 * 60 * 1000;
+  return buildDailyZones(null, dailyCandles).some((zone) => {
+    if (now < zone.eligibleTime || zoneDistancePct(price, zone) > 3) return false;
+    return !dailyCandles.some((candle) =>
+      candle.timestamp >= zone.eligibleTime
+      && candle.timestamp < oldHistoryCutoff
+      && touchesZone(candle, zone));
+  });
+}
+
 function dedupeReversalSignals(signals) {
   const gapMs = REVERSAL_SIGNAL_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
   const kept = [];
@@ -512,11 +572,7 @@ function buildReversalSignal(asset, dailyCandles, triggerCandles) {
         && touchesZone(candle, zone));
       const hasPriorEntry = hasOlderDailyTouch || entries.length > 0;
       const isTouching = isValidEntry(current, previous, zone, zone.side) && !hasPriorEntry;
-      const distance = current.close < zone.zoneLow
-        ? ((zone.zoneLow - current.close) / current.close) * 100
-        : current.close > zone.zoneHigh
-          ? ((current.close - zone.zoneHigh) / current.close) * 100
-          : 0;
+      const distance = zoneDistancePct(current.close, zone);
       const movingToward = zone.side === "support"
         ? current.close < previous.close
         : current.close > previous.close;
@@ -729,14 +785,28 @@ async function handleReversalStats(req, res) {
 }
 
 async function scanReversalData(requested, selectionMode) {
+  pruneReversalCandleCache();
   const key = requested.map((asset) => asset.symbol).join(",");
   const cached = reversalCache.get(key);
   if (cached && Date.now() - cached.at < REVERSAL_CACHE_MS) return cached.data;
 
   const rows = await mapLimit(requested, 4, async (asset) => {
     try {
-      const [dailyCandles, triggerCandles] = await Promise.all([getCachedReversalCandles(asset, "1d"), getCachedReversalCandles(asset, "4h-live")]);
-      return { ...asset, ...buildReversalSignal(asset, dailyCandles, triggerCandles), error: null };
+      const dailyCandles = await getCachedReversalCandles(asset, "1d");
+      if (asset.source === "binance" && Number.isFinite(asset.tickerPrice) && !needsFourHourScan(dailyCandles, asset.tickerPrice)) {
+        return {
+          ...asset,
+          status: "waiting",
+          current: { price: asset.tickerPrice, time: Date.now(), timeframe: "ticker" },
+          signals: [],
+          zones: [],
+          fourHourScanned: false,
+          error: null,
+        };
+      }
+      const triggerCandles = await getCachedReversalCandles(asset, "4h-live");
+      const result = buildReversalSignal(asset, dailyCandles, triggerCandles);
+      return { ...asset, ...result, fourHourScanned: true, error: null };
     } catch (error) {
       return { ...asset, status: "error", current: null, signals: [], zones: [], error: error.message };
     }
@@ -747,6 +817,7 @@ async function scanReversalData(requested, selectionMode) {
     triggerTimeframe: "4h",
     selectionMode,
     minimumAgeDays: REVERSAL_MIN_AGE_DAYS,
+    fourHourCandidates: rows.filter((row) => row.fourHourScanned).length,
     proximityPct: 1.2,
     minimumAgeText: `日线区域至少形成 ${REVERSAL_MIN_AGE_DAYS} 天`,
     rows,
@@ -1830,7 +1901,12 @@ function handleHealth(req, res) {
       marketCaps: marketCapCache.data.size,
       fundingRates: fundingCache.data.size,
       scans: scanCache.size,
+      reversalCandles: reversalCandleCache.size,
       onchainSpotPrices: onchainSpotPriceCache.size,
+    },
+    binanceRateLimit: {
+      usedWeight1m: binanceRateState.used,
+      pausedUntil: binanceRateState.blockedUntil ? new Date(binanceRateState.blockedUntil).toISOString() : null,
     },
     schedulers: {
       onchainAlertChecker: onchainCheckInFlight ? "running" : "idle",
