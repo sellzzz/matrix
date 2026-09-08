@@ -21,6 +21,7 @@ let reversalCache = new Map();
 let reversalHistory = null;
 const REVERSAL_MIN_AGE_DAYS = 14;
 const REVERSAL_MIN_AGE_MS = REVERSAL_MIN_AGE_DAYS * 24 * 60 * 60 * 1000;
+const REVERSAL_STRATEGY_VERSION = "isolated-pivot-v2";
 let vixCache = { at: 0, data: null };
 let dxyCache = { at: 0, data: null };
 let treasuryCurveCache = { at: 0, data: null };
@@ -386,9 +387,9 @@ function averageRange(candles, index) {
   return rows.reduce((sum, row) => sum + Math.max(0, row.high - row.low), 0) / rows.length;
 }
 
-function isPivot(candles, index, side) {
+function isPivot(candles, index, side, radius = 4) {
   const pivot = side === "support" ? candles[index].low : candles[index].high;
-  for (let offset = -2; offset <= 2; offset += 1) {
+  for (let offset = -radius; offset <= radius; offset += 1) {
     if (!offset) continue;
     const value = side === "support" ? candles[index + offset].low : candles[index + offset].high;
     if (side === "support" && value < pivot) return false;
@@ -416,17 +417,25 @@ function isValidEntry(candle, previous, zone, side) {
   return side === "support" ? candle.close >= low : candle.close <= high;
 }
 
+function hasCleanMaturation(candles, originIndex, zone) {
+  const intervening = candles
+    .slice(originIndex + 3)
+    .filter((candle) => candle.timestamp < zone.eligibleTime);
+  return intervening.length > 0 && intervening.every((candle) => !touchesZone(candle, zone));
+}
+
 function buildDailyZones(asset, candles) {
   const zones = [];
   for (const side of ["support", "resistance"]) {
-    for (let index = 2; index <= candles.length - 3; index += 1) {
+    for (let index = 4; index <= candles.length - 5; index += 1) {
       if (!isPivot(candles, index, side)) continue;
       const point = side === "support" ? candles[index].low : candles[index].high;
       const width = Math.max(point * 0.01, averageRange(candles, index) * 0.7);
       const range = side === "support"
         ? { low: point - width * 0.35, high: point + width }
         : { low: point - width, high: point + width * 0.35 };
-      zones.push({
+      const zone = {
+        strategyVersion: REVERSAL_STRATEGY_VERSION,
         side,
         type: side === "support" ? "support-touch" : "resistance-touch",
         label: side === "support" ? "支撑区再次触及" : "阻力区再次触及",
@@ -438,7 +447,9 @@ function buildDailyZones(asset, candles) {
         confirmedTime: candles[index + 2].timestamp,
         eligibleTime: candles[index].timestamp + REVERSAL_MIN_AGE_MS,
         originIndex: index,
-      });
+      };
+      if (!hasCleanMaturation(candles, index, zone)) continue;
+      zones.push(zone);
     }
   }
   return zones;
@@ -530,13 +541,14 @@ async function loadReversalHistory() {
 function isEligibleReversalRecord(record) {
   const originTime = Number(record?.originTime);
   const triggerTime = Number(record?.triggerTime ?? record?.touchTime);
+  if (record?.strategyVersion !== REVERSAL_STRATEGY_VERSION) return false;
   if (!Number.isFinite(originTime) || !Number.isFinite(triggerTime)) return true;
   return triggerTime - originTime >= REVERSAL_MIN_AGE_MS;
 }
 
 function reversalHistoryKey(signal) {
   const state = signal.isSecondTouch ? "revisit" : "approaching";
-  return [signal.symbol, signal.type, state, signal.originTime, signal.touchTime].join(":");
+  return [signal.strategyVersion || "legacy", signal.symbol, signal.type, state, signal.originTime, signal.touchTime].join(":");
 }
 
 async function recordReversalSignals(signals) {
