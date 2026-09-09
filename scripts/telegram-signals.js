@@ -151,11 +151,13 @@ function buildSmallCapMessage(data) {
 }
 
 function buildReversalMessage(records) {
+  const watchlistCount = buildTradingViewWatchlist(records).length;
   const header = [
     "<b>Daily Key Zone Signals</b>",
     `New records: ${records.length}`,
     "Anchor: 1D | Trigger: 4h | Manual decision only",
-  ].join("\n");
+    watchlistCount ? `TradingView list: ${watchlistCount} symbols (file below)` : "",
+  ].filter(Boolean).join("\n");
   const rows = records.slice(0, 10).map((row, index) => {
     const support = row.type === "support-touch";
     const state = row.status === "approaching" ? "Approaching alert" : "Zone re-entry";
@@ -171,6 +173,25 @@ function buildReversalMessage(records) {
     ].join("\n");
   });
   return `${header}\n\n${rows.join("\n\n")}`;
+}
+
+function buildTradingViewWatchlist(records) {
+  return [...new Set(records
+    .map((row) => tradingViewChart(row).symbol)
+    .map((symbol) => String(symbol || "").trim().toUpperCase())
+    .filter((symbol) => symbol.includes(":")))];
+}
+
+function watchlistFilename() {
+  const timestamp = new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date()).replaceAll(/[-: ]/g, "");
+  return `tradingview-key-zone-${timestamp}.txt`;
 }
 
 function buildOnchainMessage(events) {
@@ -245,6 +266,21 @@ async function sendTelegram(text) {
   }
 }
 
+async function sendTradingViewWatchlist(records) {
+  const symbols = buildTradingViewWatchlist(records);
+  if (!symbols.length) return;
+  const form = new FormData();
+  form.append("chat_id", chatId);
+  form.append("caption", `TradingView 自选列表｜本批 ${symbols.length} 个标的`);
+  form.append("document", new Blob([symbols.join(",")], { type: "text/plain;charset=utf-8" }), watchlistFilename());
+  const response = await fetchWithTimeout(`https://api.telegram.org/bot${token}/sendDocument`, {
+    method: "POST",
+    body: form,
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.description || `Telegram document ${response.status}`);
+}
+
 async function run() {
   const includeSummary = once || Date.now() - lastSummaryAt >= summaryIntervalMs;
   const results = await Promise.allSettled([
@@ -286,6 +322,13 @@ async function run() {
     return;
   }
   await sendTelegram(sections.join("\n\n"));
+  if (newReversalRecords.length) {
+    try {
+      await sendTradingViewWatchlist(newReversalRecords);
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] TradingView watchlist: ${error.message}`);
+    }
+  }
   if (reversalState && newReversalRecords.length) await markReversalRecordsSent(newReversalRecords, reversalState);
   if (onchainState && newOnchainEvents.length) await markOnchainEventsSent(newOnchainEvents, onchainState);
   if (includeSummary) lastSummaryAt = Date.now();
