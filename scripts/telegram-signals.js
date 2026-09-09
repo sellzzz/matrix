@@ -7,6 +7,7 @@ const DEFAULT_SMALLCAP_SCAN_URL =
   "http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=0&maxSymbols=500&smallCapMaxUsd=100000000&smallCapMinChange=30";
 const DEFAULT_REVERSAL_HISTORY_URL = "http://127.0.0.1:8787/api/reversal/history?limit=100";
 const DEFAULT_ONCHAIN_EVENTS_URL = "http://127.0.0.1:8787/api/onchain/alerts/events";
+const DEFAULT_MANUAL_PUSH_URL = "http://127.0.0.1:8787/api/reversal/manual-push";
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_MS = 60 * 1000;
 
@@ -16,6 +17,7 @@ const scanUrl = process.env.SIGNAL_SCAN_URL || DEFAULT_SCAN_URL;
 const smallCapScanUrl = process.env.SMALLCAP_SCAN_URL || DEFAULT_SMALLCAP_SCAN_URL;
 const reversalHistoryUrl = process.env.REVERSAL_HISTORY_URL || DEFAULT_REVERSAL_HISTORY_URL;
 const onchainEventsUrl = process.env.ONCHAIN_EVENTS_URL || DEFAULT_ONCHAIN_EVENTS_URL;
+const manualPushUrl = process.env.REVERSAL_MANUAL_PUSH_URL || DEFAULT_MANUAL_PUSH_URL;
 const reversalStateFile = process.env.REVERSAL_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-reversal-state.json");
 const onchainStateFile = process.env.ONCHAIN_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-onchain-state.json");
 const summaryIntervalMs = Math.max(60_000, Number(process.env.SIGNAL_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
@@ -281,6 +283,31 @@ async function sendTradingViewWatchlist(records) {
   if (!response.ok) throw new Error(payload.description || `Telegram document ${response.status}`);
 }
 
+async function acknowledgeManualPush(id) {
+  const response = await fetchWithTimeout(manualPushUrl, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id, status: "sent" }),
+  });
+  if (!response.ok) throw new Error(`Manual push acknowledgement ${response.status}`);
+}
+
+async function sendManualPushRequests(data) {
+  const requests = Array.isArray(data.requests) ? data.requests : [];
+  for (const request of requests) {
+    const records = Array.isArray(request.records) ? request.records : [];
+    if (!request.id || !records.length) continue;
+    await sendTelegram(`<b>Manual Push</b>\n\n${buildReversalMessage(records)}`);
+    try {
+      await sendTradingViewWatchlist(records);
+    } catch (error) {
+      console.error(`[${new Date().toISOString()}] Manual TradingView watchlist: ${error.message}`);
+    }
+    await acknowledgeManualPush(request.id);
+    console.log(`[${new Date().toISOString()}] sent manual keyzone=${records.length}`);
+  }
+}
+
 async function run() {
   const includeSummary = once || Date.now() - lastSummaryAt >= summaryIntervalMs;
   const results = await Promise.allSettled([
@@ -288,12 +315,14 @@ async function run() {
     includeSummary ? fetchWithTimeout(smallCapScanUrl) : Promise.resolve(null),
     fetchWithTimeout(reversalHistoryUrl),
     fetchWithTimeout(onchainEventsUrl),
+    fetchWithTimeout(manualPushUrl),
   ]);
-  const [signalResult, smallCapResult, reversalResult, onchainResult] = results;
+  const [signalResult, smallCapResult, reversalResult, onchainResult, manualPushResult] = results;
   const signalData = includeSummary && signalResult.status === "fulfilled" ? await signalResult.value.json().catch(() => ({})) : { error: signalResult.reason?.message };
   const smallCapData = includeSummary && smallCapResult.status === "fulfilled" ? await smallCapResult.value.json().catch(() => ({})) : { error: smallCapResult.reason?.message };
   const reversalData = reversalResult.status === "fulfilled" ? await reversalResult.value.json().catch(() => ({})) : { error: reversalResult.reason?.message };
   const onchainData = onchainResult.status === "fulfilled" ? await onchainResult.value.json().catch(() => ({})) : { error: onchainResult.reason?.message };
+  const manualPushData = manualPushResult.status === "fulfilled" ? await manualPushResult.value.json().catch(() => ({})) : { error: manualPushResult.reason?.message };
   const signalOk = includeSummary && signalResult.status === "fulfilled" && signalResult.value?.ok;
   const smallCapOk = includeSummary && smallCapResult.status === "fulfilled" && smallCapResult.value?.ok;
   const sections = [];
@@ -317,21 +346,24 @@ async function run() {
     newOnchainEvents = fresh.fresh;
     if (newOnchainEvents.length) sections.push(buildOnchainMessage(newOnchainEvents));
   }
-  if (!sections.length) {
+  if (sections.length) {
+    await sendTelegram(sections.join("\n\n"));
+    if (newReversalRecords.length) {
+      try {
+        await sendTradingViewWatchlist(newReversalRecords);
+      } catch (error) {
+        console.error(`[${new Date().toISOString()}] TradingView watchlist: ${error.message}`);
+      }
+    }
+    if (reversalState && newReversalRecords.length) await markReversalRecordsSent(newReversalRecords, reversalState);
+    if (onchainState && newOnchainEvents.length) await markOnchainEventsSent(newOnchainEvents, onchainState);
+    if (includeSummary) lastSummaryAt = Date.now();
+  }
+  if (manualPushResult.status === "fulfilled" && manualPushResult.value.ok) await sendManualPushRequests(manualPushData);
+  if (!sections.length && !(Array.isArray(manualPushData.requests) && manualPushData.requests.length)) {
     console.log(`[${new Date().toISOString()}] checked: no new records`);
     return;
   }
-  await sendTelegram(sections.join("\n\n"));
-  if (newReversalRecords.length) {
-    try {
-      await sendTradingViewWatchlist(newReversalRecords);
-    } catch (error) {
-      console.error(`[${new Date().toISOString()}] TradingView watchlist: ${error.message}`);
-    }
-  }
-  if (reversalState && newReversalRecords.length) await markReversalRecordsSent(newReversalRecords, reversalState);
-  if (onchainState && newOnchainEvents.length) await markOnchainEventsSent(newOnchainEvents, onchainState);
-  if (includeSummary) lastSummaryAt = Date.now();
   console.log(`[${new Date().toISOString()}] sent position=${includeSummary && Array.isArray(signalData.alerts) ? signalData.alerts.length : 0}, lowcap=${includeSummary && Array.isArray(smallCapData.smallCaps) ? smallCapData.smallCaps.length : 0}, keyzone=${newReversalRecords.length}, onchain=${newOnchainEvents.length}`);
 }
 

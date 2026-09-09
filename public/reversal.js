@@ -14,8 +14,10 @@ const els = {
   statsBtn: $("statsBtn"), statsHorizon: $("statsHorizon"), statsTarget: $("statsTarget"), statsStatus: $("statsStatus"), statsSummary: $("statsSummary"),
   statsOutcomeBar: $("statsOutcomeBar"), statsTimeline: $("statsTimeline"),
   exportStatsBtn: $("exportStatsBtn"),
+  manualPushBtn: $("manualPushBtn"), manualPushStatus: $("manualPushStatus"),
 };
 let latestStats = null;
+let latestSignals = [];
 
 let controller = null;
 
@@ -184,12 +186,18 @@ async function scan() {
     els.watchCount.textContent = data.rows.length;
     els.updated.textContent = new Date(data.generatedAt).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
     els.status.textContent = `${data.selectionMode === "24h-quote-volume" ? "币安 USDT 永续自动观察池" : "手动观察池"} / 日线锚点 / 4 小时触发 / ${data.minimumAgeText}`;
+    latestSignals = data.signals || [];
+    els.manualPushBtn.disabled = latestSignals.length === 0;
+    els.manualPushStatus.textContent = latestSignals.length ? `可手动推送 ${latestSignals.length} 条` : "人工判断 · 不自动交易";
     renderSignals(data.signals);
     renderWatch(data.rows);
     await loadHistory();
   } catch (error) {
     if (error.name === "AbortError") return;
     els.status.textContent = error.message;
+    latestSignals = [];
+    els.manualPushBtn.disabled = true;
+    els.manualPushStatus.textContent = "扫描失败";
     els.signalList.innerHTML = '<div class="emptySignal">扫描失败，请稍后重试</div>';
     renderWatch([]);
   } finally {
@@ -197,7 +205,29 @@ async function scan() {
   }
 }
 
+async function manualPush() {
+  const recordKeys = [...new Set(latestSignals.map((signal) => signal.recordKey).filter(Boolean))];
+  if (!recordKeys.length) return;
+  els.manualPushBtn.disabled = true;
+  els.manualPushStatus.textContent = "正在加入推送队列…";
+  try {
+    const response = await fetch("/api/reversal/manual-push", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ recordKeys }),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "推送失败");
+    els.manualPushStatus.textContent = data.duplicate ? "本批已在推送队列" : `已排队 ${data.request.count} 条 · 1 分钟内发送`;
+  } catch (error) {
+    els.manualPushStatus.textContent = error.message;
+  } finally {
+    setTimeout(() => { els.manualPushBtn.disabled = latestSignals.length === 0; }, 3000);
+  }
+}
+
 els.refreshBtn.addEventListener("click", scan);
+els.manualPushBtn.addEventListener("click", manualPush);
 els.statsBtn.addEventListener("click", loadStats);
 els.exportStatsBtn.addEventListener("click", () => {
   if (!latestStats?.records?.length) return;

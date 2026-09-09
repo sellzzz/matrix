@@ -804,6 +804,15 @@ dialog::backdrop {
   padding: 12px;
 }
 
+.reversalSignalPanel .panelHead {
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.reversalSignalPanel .panelHead .actions {
+  justify-content: flex-end;
+}
+
 .reversalSignal {
   padding: 16px;
   border: 1px solid #2b4f79;
@@ -1676,6 +1685,15 @@ dialog {
 @media (max-width: 760px) {
   .reversalStatsForm,
   .reversalStatsSummary { grid-template-columns: 1fr; }
+
+  .reversalSignalPanel .panelHead {
+    flex-direction: column;
+  }
+
+  .reversalSignalPanel .panelHead .actions {
+    width: 100%;
+    justify-content: space-between;
+  }
 
   .statsTimeline { grid-template-columns: repeat(10, minmax(18px, 1fr)); }
 }

@@ -51,7 +51,10 @@
       <section class="panel reversalSignalPanel">
         <div class="panelHead">
           <div><h2>关键区域信号</h2><p id="status">等待扫描 · 自动检查间隔 2 小时</p></div>
-          <span class="macroSource">人工判断 · 不自动交易</span>
+          <div class="actions">
+            <span id="manualPushStatus" class="macroSource">人工判断 · 不自动交易</span>
+            <button id="manualPushBtn" type="button" class="secondary" disabled>推送当前信号</button>
+          </div>
         </div>
         <div id="signalList" class="reversalSignalList"></div>
       </section>

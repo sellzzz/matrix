@@ -19,6 +19,7 @@ export const config = Object.freeze({
   reversalMaxAssets: Math.min(650, Math.max(40, Number(process.env.REVERSAL_MAX_ASSETS || 600))),
   reversalHistoryFile: join(dataDir, "reversal-signals.json"),
   reversalHistoryLimit: 500,
+  reversalManualPushFile: join(dataDir, "reversal-manual-push.json"),
   onchainAlertsFile: join(dataDir, "onchain-alerts.json"),
   onchainAlertLimit: 200,
   onchainPriceCacheMs: 30_000,

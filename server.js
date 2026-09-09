@@ -7,7 +7,7 @@ import { config } from "./src/config.js";
 import { createJsonStore } from "./src/json-store.js";
 import { createRouter } from "./src/router.js";
 
-const { port: PORT, publicDir: PUBLIC_DIR, binanceFapi: BINANCE_FAPI, coingeckoApi: COINGECKO_API, dexscreenerApi: DEXSCREENER_API, bscRpc: BSC_RPC, cacheMs: CACHE_MS, macroCacheMs: MACRO_CACHE_MS, fetchTimeoutMs: FETCH_TIMEOUT_MS, maxScanCache: MAX_SCAN_CACHE, reversalCacheMs: REVERSAL_CACHE_MS, reversalTopFutures: REVERSAL_TOP_FUTURES, reversalMaxAssets: REVERSAL_MAX_ASSETS, reversalHistoryFile: REVERSAL_HISTORY_FILE, reversalHistoryLimit: REVERSAL_HISTORY_LIMIT, onchainAlertsFile: ONCHAIN_ALERTS_FILE, onchainAlertLimit: ONCHAIN_ALERT_LIMIT, onchainPriceCacheMs: ONCHAIN_PRICE_CACHE_MS, onchainCheckConcurrency: ONCHAIN_CHECK_CONCURRENCY, reversalSignalCooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, fredApi: FRED_API, treasuryCurveCsv: TREASURY_CURVE_CSV, cmeFedwatchApi: CME_FEDWATCH_API, concurrency: CONCURRENCY } = config;
+const { port: PORT, publicDir: PUBLIC_DIR, binanceFapi: BINANCE_FAPI, coingeckoApi: COINGECKO_API, dexscreenerApi: DEXSCREENER_API, bscRpc: BSC_RPC, cacheMs: CACHE_MS, macroCacheMs: MACRO_CACHE_MS, fetchTimeoutMs: FETCH_TIMEOUT_MS, maxScanCache: MAX_SCAN_CACHE, reversalCacheMs: REVERSAL_CACHE_MS, reversalTopFutures: REVERSAL_TOP_FUTURES, reversalMaxAssets: REVERSAL_MAX_ASSETS, reversalHistoryFile: REVERSAL_HISTORY_FILE, reversalHistoryLimit: REVERSAL_HISTORY_LIMIT, reversalManualPushFile: REVERSAL_MANUAL_PUSH_FILE, onchainAlertsFile: ONCHAIN_ALERTS_FILE, onchainAlertLimit: ONCHAIN_ALERT_LIMIT, onchainPriceCacheMs: ONCHAIN_PRICE_CACHE_MS, onchainCheckConcurrency: ONCHAIN_CHECK_CONCURRENCY, reversalSignalCooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, fredApi: FRED_API, treasuryCurveCsv: TREASURY_CURVE_CSV, cmeFedwatchApi: CME_FEDWATCH_API, concurrency: CONCURRENCY } = config;
 
 let symbolsCache = { at: 0, data: [] };
 let marketCapCache = { at: 0, data: new Map() };
@@ -21,6 +21,7 @@ let reversalCache = new Map();
 let reversalCandleCache = new Map();
 let binanceRateState = { used: 0, blockedUntil: 0 };
 let reversalHistory = null;
+let reversalManualPush = null;
 const REVERSAL_MIN_AGE_DAYS = 14;
 const REVERSAL_MIN_AGE_MS = REVERSAL_MIN_AGE_DAYS * 24 * 60 * 60 * 1000;
 const REVERSAL_STRATEGY_VERSION = "isolated-pivot-v2";
@@ -32,6 +33,7 @@ let onchainCheckInFlight = false;
 const onchainSpotPriceCache = new Map();
 
 const reversalStore = createJsonStore({ file: REVERSAL_HISTORY_FILE, fallback: [], limit: REVERSAL_HISTORY_LIMIT });
+const reversalManualPushStore = createJsonStore({ file: REVERSAL_MANUAL_PUSH_FILE, fallback: { requests: [] } });
 const onchainStore = createJsonStore({ file: ONCHAIN_ALERTS_FILE, fallback: { alerts: [], events: [] } });
 
 const POOL_IFACE = new Interface([
@@ -664,6 +666,65 @@ async function handleReversalHistory(req, res) {
   json(res, 200, { generatedAt: new Date().toISOString(), records });
 }
 
+async function loadReversalManualPush() {
+  if (reversalManualPush) return reversalManualPush;
+  const parsed = await reversalManualPushStore.load();
+  reversalManualPush = parsed && Array.isArray(parsed.requests) ? parsed : { requests: [] };
+  return reversalManualPush;
+}
+
+async function saveReversalManualPush() {
+  const store = await loadReversalManualPush();
+  store.requests = store.requests.slice(-50);
+  await reversalManualPushStore.save(store);
+}
+
+async function handleReversalManualPush(req, res) {
+  const store = await loadReversalManualPush();
+  if (req.method === "GET") {
+    const pending = store.requests.filter((request) => request.status === "pending").slice(0, 5);
+    return json(res, 200, { requests: pending });
+  }
+  if (req.method === "PATCH") {
+    try {
+      const input = await readJsonBody(req);
+      const request = store.requests.find((item) => item.id === input.id);
+      if (!request) return json(res, 404, { error: "Push request not found" });
+      request.status = input.status === "sent" ? "sent" : "pending";
+      request.updatedAt = new Date().toISOString();
+      await saveReversalManualPush();
+      return json(res, 200, { request: { id: request.id, status: request.status } });
+    } catch (error) {
+      return json(res, 400, { error: error.message });
+    }
+  }
+  if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
+  try {
+    const input = await readJsonBody(req);
+    const keys = [...new Set((Array.isArray(input.recordKeys) ? input.recordKeys : []).map(String))].slice(0, 20);
+    if (!keys.length) return json(res, 400, { error: "当前没有可推送的信号" });
+    const keySet = new Set(keys);
+    const history = await loadReversalHistory();
+    const records = history.filter((record) => keySet.has(record.recordKey));
+    if (!records.length) return json(res, 404, { error: "没有找到对应的信号记录，请先刷新扫描" });
+    const fingerprint = records.map((record) => record.recordKey).sort().join("|");
+    const recent = store.requests.find((request) => request.fingerprint === fingerprint && Date.now() - new Date(request.createdAt).getTime() < 60_000);
+    if (recent) return json(res, 200, { request: { id: recent.id, status: recent.status, count: recent.records.length }, duplicate: true });
+    const request = {
+      id: `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      createdAt: new Date().toISOString(),
+      status: "pending",
+      fingerprint,
+      records,
+    };
+    store.requests.push(request);
+    await saveReversalManualPush();
+    return json(res, 202, { request: { id: request.id, status: request.status, count: records.length } });
+  } catch (error) {
+    return json(res, 400, { error: error.message });
+  }
+}
+
 function buildReversalStats(asset, dailyCandles, triggerCandles, horizon, targetPct) {
   const horizonMs = horizon * 24 * 60 * 60 * 1000;
   const candidates = [];
@@ -821,7 +882,7 @@ async function scanReversalData(requested, selectionMode) {
     proximityPct: 1.2,
     minimumAgeText: `日线区域至少形成 ${REVERSAL_MIN_AGE_DAYS} 天`,
     rows,
-    signals: rows.flatMap((row) => row.signals.map((signal) => ({ ...signal, ...row }))),
+    signals: rows.flatMap((row) => row.signals.map((signal) => ({ ...signal, ...row, recordKey: reversalHistoryKey(signal) }))),
   };
   try {
     const history = await recordReversalSignals(data.signals);
@@ -1951,6 +2012,7 @@ async function serveStatic(req, res) {
 const dispatchRequest = createRouter({
   routes: [
     { match: (req) => req.url === "/api/health" || req.url === "/healthz", handler: handleHealth },
+    { match: (req) => req.url.startsWith("/api/reversal/manual-push"), handler: handleReversalManualPush },
     { match: (req) => req.url.startsWith("/api/reversal/scan"), handler: handleReversalScan },
     { match: (req) => req.url.startsWith("/api/reversal/history"), handler: handleReversalHistory },
     { match: (req) => req.url.startsWith("/api/reversal/stats"), handler: handleReversalStats },
