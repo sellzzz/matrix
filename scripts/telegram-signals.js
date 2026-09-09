@@ -8,6 +8,7 @@ const DEFAULT_SMALLCAP_SCAN_URL =
 const DEFAULT_REVERSAL_HISTORY_URL = "http://127.0.0.1:8787/api/reversal/history?limit=100";
 const DEFAULT_ONCHAIN_EVENTS_URL = "http://127.0.0.1:8787/api/onchain/alerts/events";
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
+const DEFAULT_POLL_INTERVAL_MS = 60 * 1000;
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
@@ -17,9 +18,11 @@ const reversalHistoryUrl = process.env.REVERSAL_HISTORY_URL || DEFAULT_REVERSAL_
 const onchainEventsUrl = process.env.ONCHAIN_EVENTS_URL || DEFAULT_ONCHAIN_EVENTS_URL;
 const reversalStateFile = process.env.REVERSAL_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-reversal-state.json");
 const onchainStateFile = process.env.ONCHAIN_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-onchain-state.json");
-const intervalMs = Number(process.env.SIGNAL_INTERVAL_MS || DEFAULT_INTERVAL_MS);
+const summaryIntervalMs = Math.max(60_000, Number(process.env.SIGNAL_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
+const pollIntervalMs = Math.max(15_000, Number(process.env.TELEGRAM_POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS);
 const once = process.argv.includes("--once");
 const REQUEST_TIMEOUT_MS = 15_000;
+let lastSummaryAt = 0;
 
 if (!token || !chatId) {
   console.error("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID");
@@ -243,17 +246,25 @@ async function sendTelegram(text) {
 }
 
 async function run() {
-  const results = await Promise.allSettled([fetchWithTimeout(scanUrl), fetchWithTimeout(smallCapScanUrl), fetchWithTimeout(reversalHistoryUrl), fetchWithTimeout(onchainEventsUrl)]);
+  const includeSummary = once || Date.now() - lastSummaryAt >= summaryIntervalMs;
+  const results = await Promise.allSettled([
+    includeSummary ? fetchWithTimeout(scanUrl) : Promise.resolve(null),
+    includeSummary ? fetchWithTimeout(smallCapScanUrl) : Promise.resolve(null),
+    fetchWithTimeout(reversalHistoryUrl),
+    fetchWithTimeout(onchainEventsUrl),
+  ]);
   const [signalResult, smallCapResult, reversalResult, onchainResult] = results;
-  const signalData = signalResult.status === "fulfilled" ? await signalResult.value.json().catch(() => ({})) : { error: signalResult.reason?.message };
-  const smallCapData = smallCapResult.status === "fulfilled" ? await smallCapResult.value.json().catch(() => ({})) : { error: smallCapResult.reason?.message };
+  const signalData = includeSummary && signalResult.status === "fulfilled" ? await signalResult.value.json().catch(() => ({})) : { error: signalResult.reason?.message };
+  const smallCapData = includeSummary && smallCapResult.status === "fulfilled" ? await smallCapResult.value.json().catch(() => ({})) : { error: smallCapResult.reason?.message };
   const reversalData = reversalResult.status === "fulfilled" ? await reversalResult.value.json().catch(() => ({})) : { error: reversalResult.reason?.message };
   const onchainData = onchainResult.status === "fulfilled" ? await onchainResult.value.json().catch(() => ({})) : { error: onchainResult.reason?.message };
-  const signalOk = signalResult.status === "fulfilled" && signalResult.value.ok;
-  const smallCapOk = smallCapResult.status === "fulfilled" && smallCapResult.value.ok;
+  const signalOk = includeSummary && signalResult.status === "fulfilled" && signalResult.value?.ok;
+  const smallCapOk = includeSummary && smallCapResult.status === "fulfilled" && smallCapResult.value?.ok;
   const sections = [];
-  sections.push(signalOk ? buildMessage(signalData) : `<b>Position Change Signals</b>\n读取失败: ${htmlEscape(signalData.error || `HTTP ${signalResult.value?.status || "network"}`)}`);
-  sections.push(smallCapOk ? buildSmallCapMessage(smallCapData) : `<b>Low-Cap Position Signals</b>\n读取失败: ${htmlEscape(smallCapData.error || `HTTP ${smallCapResult.value?.status || "network"}`)}`);
+  if (includeSummary) {
+    sections.push(signalOk ? buildMessage(signalData) : `<b>Position Change Signals</b>\n读取失败: ${htmlEscape(signalData.error || `HTTP ${signalResult.value?.status || "network"}`)}`);
+    sections.push(smallCapOk ? buildSmallCapMessage(smallCapData) : `<b>Low-Cap Position Signals</b>\n读取失败: ${htmlEscape(smallCapData.error || `HTTP ${smallCapResult.value?.status || "network"}`)}`);
+  }
   let reversalState = null;
   let newReversalRecords = [];
   if (reversalResult.status === "fulfilled" && reversalResult.value.ok) {
@@ -270,10 +281,15 @@ async function run() {
     newOnchainEvents = fresh.fresh;
     if (newOnchainEvents.length) sections.push(buildOnchainMessage(newOnchainEvents));
   }
+  if (!sections.length) {
+    console.log(`[${new Date().toISOString()}] checked: no new records`);
+    return;
+  }
   await sendTelegram(sections.join("\n\n"));
   if (reversalState && newReversalRecords.length) await markReversalRecordsSent(newReversalRecords, reversalState);
   if (onchainState && newOnchainEvents.length) await markOnchainEventsSent(newOnchainEvents, onchainState);
-  console.log(`[${new Date().toISOString()}] sent position=${Array.isArray(signalData.alerts) ? signalData.alerts.length : 0}, lowcap=${Array.isArray(smallCapData.smallCaps) ? smallCapData.smallCaps.length : 0}`);
+  if (includeSummary) lastSummaryAt = Date.now();
+  console.log(`[${new Date().toISOString()}] sent position=${includeSummary && Array.isArray(signalData.alerts) ? signalData.alerts.length : 0}, lowcap=${includeSummary && Array.isArray(smallCapData.smallCaps) ? smallCapData.smallCaps.length : 0}, keyzone=${newReversalRecords.length}, onchain=${newOnchainEvents.length}`);
 }
 
 async function loop() {
@@ -284,7 +300,7 @@ async function loop() {
       console.error(`[${new Date().toISOString()}] ${error.message}`);
     }
     if (once) break;
-    await new Promise((resolve) => setTimeout(resolve, Number.isFinite(intervalMs) ? intervalMs : DEFAULT_INTERVAL_MS));
+    await new Promise((resolve) => setTimeout(resolve, Number.isFinite(pollIntervalMs) ? pollIntervalMs : DEFAULT_POLL_INTERVAL_MS));
   }
 }
 
