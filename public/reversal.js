@@ -206,7 +206,11 @@ async function scan() {
 }
 
 async function manualPush() {
-  const recordKeys = [...new Set(latestSignals.map((signal) => signal.recordKey).filter(Boolean))];
+  const recordKeys = [...new Set(latestSignals.map((signal) => {
+    const key = String(signal.recordKey || "").trim();
+    const symbol = String(signal.symbol || "").trim().toUpperCase();
+    return key.includes("::") && symbol ? key.replace("::", `:${symbol}:`) : key;
+  }).filter(Boolean))];
   if (!recordKeys.length) return;
   els.manualPushBtn.disabled = true;
   els.manualPushStatus.textContent = "正在加入推送队列…";
