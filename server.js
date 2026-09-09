@@ -701,7 +701,9 @@ async function handleReversalManualPush(req, res) {
   if (req.method !== "POST") return json(res, 405, { error: "Method not allowed" });
   try {
     const input = await readJsonBody(req);
-    const keys = [...new Set((Array.isArray(input.recordKeys) ? input.recordKeys : []).map(String))].slice(0, 20);
+    const keys = [...new Set((Array.isArray(input.recordKeys) ? input.recordKeys : [])
+      .map((key) => String(key).trim())
+      .filter((key) => key && !key.includes("::")))].slice(0, 20);
     if (!keys.length) return json(res, 400, { error: "当前没有可推送的信号" });
     const keySet = new Set(keys);
     const history = await loadReversalHistory();
@@ -882,7 +884,10 @@ async function scanReversalData(requested, selectionMode) {
     proximityPct: 1.2,
     minimumAgeText: `日线区域至少形成 ${REVERSAL_MIN_AGE_DAYS} 天`,
     rows,
-    signals: rows.flatMap((row) => row.signals.map((signal) => ({ ...signal, ...row, recordKey: reversalHistoryKey(signal) }))),
+    signals: rows.flatMap((row) => row.signals.map((signal) => {
+      const merged = { ...signal, ...row };
+      return { ...merged, recordKey: reversalHistoryKey(merged) };
+    })),
   };
   try {
     const history = await recordReversalSignals(data.signals);
