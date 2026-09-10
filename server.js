@@ -2036,7 +2036,14 @@ function handleHealth(req, res) {
 
 async function serveStatic(req, res) {
   const url = new URL(req.url, `http://${req.headers.host}`);
-  const pathname = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
+  let pathname;
+  try {
+    pathname = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
+  } catch {
+    res.writeHead(400, { "content-type": "text/plain; charset=utf-8" });
+    res.end("Bad request");
+    return;
+  }
   const safePath = normalize(pathname).replace(/^[/\\]+/, "");
   const filePath = resolve(PUBLIC_DIR, safePath);
   if (filePath !== resolve(PUBLIC_DIR) && !filePath.startsWith(`${resolve(PUBLIC_DIR)}${sep}`)) {
