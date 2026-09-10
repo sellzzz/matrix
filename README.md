@@ -58,6 +58,8 @@ http://localhost:8787/api/health
 
 关键区域模块会扫描固定港股、币安美股合约、黄金白银，以及按币安合约 24 小时成交额自动选出的前列交易对，也支持通过页面输入自定义标的。日线只负责生成历史支撑与阻力区域；价格从正确方向重新进入区域时，由 4 小时 K 线触发提醒。连续停留在区域内不会重复计数，已经穿透区域的 K 线不会当成有效触发。
 
+实时观察进程只监听距离有效区域 5% 以内的币安候选，不连接账户，也不会下单。它通过 WebSocket 记录接近、触及、穿透、收回确认和未触及转向，同时保留最近 15 分钟的主动成交、强平和持仓量变化，用于判断是否存在流动性扫单证据。
+
 指定端口：
 
 ```bash
@@ -90,6 +92,14 @@ PORT=8787 pm2 start server.js --name market-dashboard
 pm2 save
 ```
 
+启动关键区域实时观察（独立进程，不影响主服务）：
+
+```bash
+cd /opt/binance-dashboard
+pm2 start npm --name key-zone-realtime -- run monitor:realtime
+pm2 save
+```
+
 访问：
 
 ```text
@@ -105,6 +115,8 @@ http://服务器IP:8787/smallcap.html
 - `BSC_RPC`: RPC endpoint，默认 `https://bsc-dataseed.binance.org`
 - `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY`: 如服务器需要代理访问外部接口，可设置代理
 - `CME_FEDWATCH_API_URL`: 可选，覆盖 FedWatch API 地址
+- `REALTIME_CANDIDATE_REFRESH_MS`: 实时候选列表刷新间隔，默认 60 秒
+- `REALTIME_OI_INTERVAL_MS`: 接近区域标的的持仓量采样间隔，默认 120 秒
 
 ## 数据源
 
@@ -155,6 +167,7 @@ Optional overrides:
 SIGNAL_SCAN_URL='http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=30&maxSymbols=500'
 SMALLCAP_SCAN_URL='http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=0&maxSymbols=500&smallCapMaxUsd=100000000&smallCapMinChange=30'
 REVERSAL_HISTORY_URL='http://127.0.0.1:8787/api/reversal/history?limit=100'
+REVERSAL_REALTIME_URL='http://127.0.0.1:8787/api/reversal/realtime?limit=100'
 SIGNAL_INTERVAL_MS=3600000
 TELEGRAM_POLL_INTERVAL_MS=60000
 ```

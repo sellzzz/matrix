@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js && node --check src/config.js && node --check src/json-store.js && node --check src/router.js && node --check public/app.js && node --check public/home.js && node --check public/onchain.js && node --check public/reversal.js && node --check public/smallcap.js && node --check scripts/telegram-signals.js",
-    "notify:telegram": "node scripts/telegram-signals.js"
+    "check": "node --check server.js && node --check src/config.js && node --check src/json-store.js && node --check src/router.js && node --check src/realtime-zone-engine.js && node --check public/app.js && node --check public/home.js && node --check public/onchain.js && node --check public/reversal.js && node --check public/smallcap.js && node --check scripts/telegram-signals.js && node --check scripts/reversal-realtime.js",
+    "notify:telegram": "node scripts/telegram-signals.js",
+    "monitor:realtime": "node scripts/reversal-realtime.js",
+    "test:realtime": "node scripts/test-realtime-zone.js"
   },
   "dependencies": {
     "ethers": "^6.16.0",

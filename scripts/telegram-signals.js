@@ -6,6 +6,7 @@ const DEFAULT_SCAN_URL =
 const DEFAULT_SMALLCAP_SCAN_URL =
   "http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=0&maxSymbols=500&smallCapMaxUsd=100000000&smallCapMinChange=30";
 const DEFAULT_REVERSAL_HISTORY_URL = "http://127.0.0.1:8787/api/reversal/history?limit=100";
+const DEFAULT_REVERSAL_REALTIME_URL = "http://127.0.0.1:8787/api/reversal/realtime?limit=100";
 const DEFAULT_ONCHAIN_EVENTS_URL = "http://127.0.0.1:8787/api/onchain/alerts/events";
 const DEFAULT_MANUAL_PUSH_URL = "http://127.0.0.1:8787/api/reversal/manual-push";
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
@@ -16,9 +17,11 @@ const chatId = process.env.TELEGRAM_CHAT_ID;
 const scanUrl = process.env.SIGNAL_SCAN_URL || DEFAULT_SCAN_URL;
 const smallCapScanUrl = process.env.SMALLCAP_SCAN_URL || DEFAULT_SMALLCAP_SCAN_URL;
 const reversalHistoryUrl = process.env.REVERSAL_HISTORY_URL || DEFAULT_REVERSAL_HISTORY_URL;
+const reversalRealtimeUrl = process.env.REVERSAL_REALTIME_URL || DEFAULT_REVERSAL_REALTIME_URL;
 const onchainEventsUrl = process.env.ONCHAIN_EVENTS_URL || DEFAULT_ONCHAIN_EVENTS_URL;
 const manualPushUrl = process.env.REVERSAL_MANUAL_PUSH_URL || DEFAULT_MANUAL_PUSH_URL;
 const reversalStateFile = process.env.REVERSAL_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-reversal-state.json");
+const realtimeStateFile = process.env.REVERSAL_REALTIME_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-realtime-state.json");
 const onchainStateFile = process.env.ONCHAIN_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-onchain-state.json");
 const summaryIntervalMs = Math.max(60_000, Number(process.env.SIGNAL_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
 const pollIntervalMs = Math.max(15_000, Number(process.env.TELEGRAM_POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS);
@@ -177,6 +180,38 @@ function buildReversalMessage(records) {
   return `${header}\n\n${rows.join("\n\n")}`;
 }
 
+function realtimeType(type) {
+  return ({
+    approaching: "接近区域",
+    touched: "触及区域",
+    swept: "穿透区域",
+    reclaimed: "收回确认",
+    "front-run": "未触及转向",
+  })[type] || type;
+}
+
+function buildRealtimeMessage(events) {
+  const rows = events.slice(0, 10).map((event, index) => {
+    const support = event.side === "support";
+    const chart = tradingViewChart(event);
+    const symbol = chart.url
+      ? `<a href="${htmlEscape(chart.url)}"><b>${htmlEscape(chart.symbol)}</b></a>`
+      : `<b>${htmlEscape(chart.symbol || event.symbol || "-")}</b>`;
+    const evidence = event.evidence || {};
+    const context = event.context || {};
+    const evidenceText = ({ high: "高", medium: "中", low: "低" })[evidence.level] || "待观察";
+    return [
+      `${index + 1}. ${symbol} · <b>${realtimeType(event.type)}</b>`,
+      `${support ? "支撑 / 潜在反弹" : "阻力 / 潜在回落"} | 证据 ${evidenceText} (${evidence.score ?? 0})`,
+      `价格 ${fmtPrice(event.price)} | 区域 ${fmtPrice(event.zoneLow)} - ${fmtPrice(event.zoneHigh)}`,
+      `穿透 ${fmtPct(event.penetrationPct || 0)} | OI ${fmtPct(context.oiChangePct)}`,
+      `15分钟成交 ${fmtUsd(context.tradeVolumeUsd)} | 强平 ${fmtUsd(context.liquidationUsd)}`,
+      Array.isArray(evidence.reasons) && evidence.reasons.length ? `依据 ${htmlEscape(evidence.reasons.join("、"))}` : "依据 暂无充分猎杀证据",
+    ].join("\n");
+  });
+  return `<b>Key Zone Realtime</b>\n只做观察，不自动交易\n\n${rows.join("\n\n")}`;
+}
+
 function buildTradingViewWatchlist(records) {
   return [...new Set(records
     .map((row) => tradingViewChart(row).symbol)
@@ -251,6 +286,23 @@ async function markReversalRecordsSent(records, state) {
   await writeFile(reversalStateFile, JSON.stringify(next, null, 2), "utf8");
 }
 
+async function findNewRealtimeEvents(data) {
+  let state;
+  try { state = JSON.parse(await readFile(realtimeStateFile, "utf8")); }
+  catch { state = { initialized: false, sent: [] }; }
+  const sent = new Set(Array.isArray(state.sent) ? state.sent : []);
+  const fresh = (Array.isArray(data.events) ? data.events : []).filter((event) => event.id && !sent.has(event.id));
+  if (!state.initialized) return { fresh: [], state: { ...state, initialized: true }, baseline: fresh, initialize: true };
+  return { fresh, state, baseline: [], initialize: false };
+}
+
+async function markRealtimeEventsSent(items, state) {
+  const sent = new Set(Array.isArray(state.sent) ? state.sent : []);
+  items.forEach((item) => sent.add(item.id));
+  await mkdir(join(process.cwd(), "data"), { recursive: true });
+  await writeFile(realtimeStateFile, JSON.stringify({ initialized: true, sent: [...sent].slice(-2_000), updatedAt: new Date().toISOString() }, null, 2), "utf8");
+}
+
 async function sendTelegram(text) {
   const response = await fetchWithTimeout(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
@@ -314,13 +366,15 @@ async function run() {
     includeSummary ? fetchWithTimeout(scanUrl) : Promise.resolve(null),
     includeSummary ? fetchWithTimeout(smallCapScanUrl) : Promise.resolve(null),
     fetchWithTimeout(reversalHistoryUrl),
+    fetchWithTimeout(reversalRealtimeUrl),
     fetchWithTimeout(onchainEventsUrl),
     fetchWithTimeout(manualPushUrl),
   ]);
-  const [signalResult, smallCapResult, reversalResult, onchainResult, manualPushResult] = results;
+  const [signalResult, smallCapResult, reversalResult, realtimeResult, onchainResult, manualPushResult] = results;
   const signalData = includeSummary && signalResult.status === "fulfilled" ? await signalResult.value.json().catch(() => ({})) : { error: signalResult.reason?.message };
   const smallCapData = includeSummary && smallCapResult.status === "fulfilled" ? await smallCapResult.value.json().catch(() => ({})) : { error: smallCapResult.reason?.message };
   const reversalData = reversalResult.status === "fulfilled" ? await reversalResult.value.json().catch(() => ({})) : { error: reversalResult.reason?.message };
+  const realtimeData = realtimeResult.status === "fulfilled" ? await realtimeResult.value.json().catch(() => ({})) : { error: realtimeResult.reason?.message };
   const onchainData = onchainResult.status === "fulfilled" ? await onchainResult.value.json().catch(() => ({})) : { error: onchainResult.reason?.message };
   const manualPushData = manualPushResult.status === "fulfilled" ? await manualPushResult.value.json().catch(() => ({})) : { error: manualPushResult.reason?.message };
   const signalOk = includeSummary && signalResult.status === "fulfilled" && signalResult.value?.ok;
@@ -337,6 +391,18 @@ async function run() {
     reversalState = fresh.state;
     newReversalRecords = fresh.fresh;
     if (newReversalRecords.length) sections.push(buildReversalMessage(newReversalRecords));
+  }
+  let realtimeState = null;
+  let newRealtimeEvents = [];
+  let realtimeBaseline = [];
+  let initializeRealtimeState = false;
+  if (realtimeResult.status === "fulfilled" && realtimeResult.value.ok) {
+    const fresh = await findNewRealtimeEvents(realtimeData);
+    realtimeState = fresh.state;
+    newRealtimeEvents = fresh.fresh;
+    realtimeBaseline = fresh.baseline;
+    initializeRealtimeState = fresh.initialize;
+    if (newRealtimeEvents.length) sections.push(buildRealtimeMessage(newRealtimeEvents));
   }
   let onchainState = null;
   let newOnchainEvents = [];
@@ -356,15 +422,21 @@ async function run() {
       }
     }
     if (reversalState && newReversalRecords.length) await markReversalRecordsSent(newReversalRecords, reversalState);
+    if (realtimeState && (initializeRealtimeState || newRealtimeEvents.length || realtimeBaseline.length)) {
+      await markRealtimeEventsSent([...newRealtimeEvents, ...realtimeBaseline], realtimeState);
+    }
     if (onchainState && newOnchainEvents.length) await markOnchainEventsSent(newOnchainEvents, onchainState);
     if (includeSummary) lastSummaryAt = Date.now();
+  }
+  if (!sections.length && realtimeState && (initializeRealtimeState || realtimeBaseline.length)) {
+    await markRealtimeEventsSent(realtimeBaseline, realtimeState);
   }
   if (manualPushResult.status === "fulfilled" && manualPushResult.value.ok) await sendManualPushRequests(manualPushData);
   if (!sections.length && !(Array.isArray(manualPushData.requests) && manualPushData.requests.length)) {
     console.log(`[${new Date().toISOString()}] checked: no new records`);
     return;
   }
-  console.log(`[${new Date().toISOString()}] sent position=${includeSummary && Array.isArray(signalData.alerts) ? signalData.alerts.length : 0}, lowcap=${includeSummary && Array.isArray(smallCapData.smallCaps) ? smallCapData.smallCaps.length : 0}, keyzone=${newReversalRecords.length}, onchain=${newOnchainEvents.length}`);
+  console.log(`[${new Date().toISOString()}] sent position=${includeSummary && Array.isArray(signalData.alerts) ? signalData.alerts.length : 0}, lowcap=${includeSummary && Array.isArray(smallCapData.smallCaps) ? smallCapData.smallCaps.length : 0}, keyzone=${newReversalRecords.length}, realtime=${newRealtimeEvents.length}, onchain=${newOnchainEvents.length}`);
 }
 
 async function loop() {

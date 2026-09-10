@@ -20,6 +20,8 @@ export const config = Object.freeze({
   reversalHistoryFile: join(dataDir, "reversal-signals.json"),
   reversalHistoryLimit: 500,
   reversalManualPushFile: join(dataDir, "reversal-manual-push.json"),
+  reversalCandidateFile: join(dataDir, "reversal-realtime-candidates.json"),
+  reversalRealtimeFile: join(dataDir, "reversal-realtime.json"),
   onchainAlertsFile: join(dataDir, "onchain-alerts.json"),
   onchainAlertLimit: 200,
   onchainPriceCacheMs: 30_000,

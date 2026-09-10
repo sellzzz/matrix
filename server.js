@@ -7,7 +7,7 @@ import { config } from "./src/config.js";
 import { createJsonStore } from "./src/json-store.js";
 import { createRouter } from "./src/router.js";
 
-const { port: PORT, publicDir: PUBLIC_DIR, binanceFapi: BINANCE_FAPI, coingeckoApi: COINGECKO_API, dexscreenerApi: DEXSCREENER_API, bscRpc: BSC_RPC, cacheMs: CACHE_MS, macroCacheMs: MACRO_CACHE_MS, fetchTimeoutMs: FETCH_TIMEOUT_MS, maxScanCache: MAX_SCAN_CACHE, reversalCacheMs: REVERSAL_CACHE_MS, reversalTopFutures: REVERSAL_TOP_FUTURES, reversalMaxAssets: REVERSAL_MAX_ASSETS, reversalHistoryFile: REVERSAL_HISTORY_FILE, reversalHistoryLimit: REVERSAL_HISTORY_LIMIT, reversalManualPushFile: REVERSAL_MANUAL_PUSH_FILE, onchainAlertsFile: ONCHAIN_ALERTS_FILE, onchainAlertLimit: ONCHAIN_ALERT_LIMIT, onchainPriceCacheMs: ONCHAIN_PRICE_CACHE_MS, onchainCheckConcurrency: ONCHAIN_CHECK_CONCURRENCY, reversalSignalCooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, fredApi: FRED_API, treasuryCurveCsv: TREASURY_CURVE_CSV, cmeFedwatchApi: CME_FEDWATCH_API, concurrency: CONCURRENCY } = config;
+const { port: PORT, publicDir: PUBLIC_DIR, binanceFapi: BINANCE_FAPI, coingeckoApi: COINGECKO_API, dexscreenerApi: DEXSCREENER_API, bscRpc: BSC_RPC, cacheMs: CACHE_MS, macroCacheMs: MACRO_CACHE_MS, fetchTimeoutMs: FETCH_TIMEOUT_MS, maxScanCache: MAX_SCAN_CACHE, reversalCacheMs: REVERSAL_CACHE_MS, reversalTopFutures: REVERSAL_TOP_FUTURES, reversalMaxAssets: REVERSAL_MAX_ASSETS, reversalHistoryFile: REVERSAL_HISTORY_FILE, reversalHistoryLimit: REVERSAL_HISTORY_LIMIT, reversalManualPushFile: REVERSAL_MANUAL_PUSH_FILE, reversalCandidateFile: REVERSAL_CANDIDATE_FILE, reversalRealtimeFile: REVERSAL_REALTIME_FILE, onchainAlertsFile: ONCHAIN_ALERTS_FILE, onchainAlertLimit: ONCHAIN_ALERT_LIMIT, onchainPriceCacheMs: ONCHAIN_PRICE_CACHE_MS, onchainCheckConcurrency: ONCHAIN_CHECK_CONCURRENCY, reversalSignalCooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, fredApi: FRED_API, treasuryCurveCsv: TREASURY_CURVE_CSV, cmeFedwatchApi: CME_FEDWATCH_API, concurrency: CONCURRENCY } = config;
 
 let symbolsCache = { at: 0, data: [] };
 let marketCapCache = { at: 0, data: new Map() };
@@ -34,6 +34,7 @@ const onchainSpotPriceCache = new Map();
 
 const reversalStore = createJsonStore({ file: REVERSAL_HISTORY_FILE, fallback: [], limit: REVERSAL_HISTORY_LIMIT });
 const reversalManualPushStore = createJsonStore({ file: REVERSAL_MANUAL_PUSH_FILE, fallback: { requests: [] } });
+const reversalCandidateStore = createJsonStore({ file: REVERSAL_CANDIDATE_FILE, fallback: { generatedAt: null, candidates: [] } });
 const onchainStore = createJsonStore({ file: ONCHAIN_ALERTS_FILE, fallback: { alerts: [], events: [] } });
 
 const POOL_IFACE = new Interface([
@@ -540,7 +541,7 @@ function needsFourHourScan(dailyCandles, price, now = Date.now()) {
   if (!Number.isFinite(price) || price <= 0) return true;
   const oldHistoryCutoff = now - 84 * 24 * 60 * 60 * 1000;
   return buildDailyZones(null, dailyCandles).some((zone) => {
-    if (now < zone.eligibleTime || zoneDistancePct(price, zone) > 3) return false;
+    if (now < zone.eligibleTime || zoneDistancePct(price, zone) > 5) return false;
     return !dailyCandles.some((candle) =>
       candle.timestamp >= zone.eligibleTime
       && candle.timestamp < oldHistoryCutoff
@@ -889,6 +890,35 @@ async function scanReversalData(requested, selectionMode) {
       return { ...merged, recordKey: reversalHistoryKey(merged) };
     })),
   };
+  if (selectionMode === "24h-quote-volume") {
+    const nearby = rows
+      .filter((row) => row.source === "binance" && row.fourHourScanned && Number.isFinite(row.current?.price))
+      .flatMap((row) => row.zones
+        .filter((zone) => !zone.hadPriorTouch && zone.distancePct <= 5)
+        .map((zone) => ({
+          symbol: row.symbol,
+          tradingViewSymbol: row.tradingViewSymbol,
+          chartUrl: row.chartUrl,
+          market: row.market,
+          currentPrice: row.current.price,
+          scannedAt: data.generatedAt,
+          ...zone,
+        })))
+      .sort((a, b) => a.distancePct - b.distancePct);
+    const candidates = [];
+    for (const candidate of nearby) {
+      const center = (candidate.zoneLow + candidate.zoneHigh) / 2;
+      const duplicate = candidates.some((kept) => {
+        if (kept.symbol !== candidate.symbol || kept.side !== candidate.side) return false;
+        const keptCenter = (kept.zoneLow + kept.zoneHigh) / 2;
+        const overlaps = candidate.zoneLow <= kept.zoneHigh && candidate.zoneHigh >= kept.zoneLow;
+        return overlaps || Math.abs(center - keptCenter) / Math.max(center, keptCenter) <= 0.03;
+      });
+      if (!duplicate) candidates.push(candidate);
+      if (candidates.length >= 80) break;
+    }
+    await reversalCandidateStore.save({ generatedAt: data.generatedAt, candidates });
+  }
   try {
     const history = await recordReversalSignals(data.signals);
     data.historyCount = history.length;
@@ -911,6 +941,26 @@ async function handleReversalScan(req, res) {
     json(res, 200, data);
   } catch (error) {
     json(res, 502, { error: error.message });
+  }
+}
+
+async function handleReversalRealtime(req, res) {
+  try {
+    const parsed = JSON.parse(await readFile(REVERSAL_REALTIME_FILE, "utf8"));
+    const url = new URL(req.url, `http://${req.headers.host}`);
+    const limit = parseInteger(url.searchParams.get("limit"), 100, 1, 500);
+    json(res, 200, {
+      ...parsed,
+      events: Array.isArray(parsed.events) ? parsed.events.slice(0, limit) : [],
+    });
+  } catch {
+    json(res, 200, {
+      generatedAt: new Date().toISOString(),
+      status: "waiting",
+      connected: false,
+      candidateCount: 0,
+      events: [],
+    });
   }
 }
 
@@ -2020,6 +2070,7 @@ const dispatchRequest = createRouter({
     { match: (req) => req.url.startsWith("/api/reversal/manual-push"), handler: handleReversalManualPush },
     { match: (req) => req.url.startsWith("/api/reversal/scan"), handler: handleReversalScan },
     { match: (req) => req.url.startsWith("/api/reversal/history"), handler: handleReversalHistory },
+    { match: (req) => req.url.startsWith("/api/reversal/realtime"), handler: handleReversalRealtime },
     { match: (req) => req.url.startsWith("/api/reversal/stats"), handler: handleReversalStats },
     { match: (req) => req.url.startsWith("/api/onchain/alerts/events"), handler: handleOnchainEvents },
     { match: (req) => req.url.startsWith("/api/onchain/alerts"), handler: handleOnchainAlerts },

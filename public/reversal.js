@@ -15,6 +15,7 @@ const els = {
   statsOutcomeBar: $("statsOutcomeBar"), statsTimeline: $("statsTimeline"),
   exportStatsBtn: $("exportStatsBtn"),
   manualPushBtn: $("manualPushBtn"), manualPushStatus: $("manualPushStatus"),
+  realtimeBody: $("realtimeBody"), realtimeStatus: $("realtimeStatus"),
 };
 let latestStats = null;
 let latestSignals = [];
@@ -93,6 +94,50 @@ async function loadHistory() {
   } catch (error) {
     els.historyStatus.textContent = error.message;
     renderHistory([]);
+  }
+}
+
+function fmtUsd(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) return "-";
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(1)}K`;
+  return `$${n.toFixed(0)}`;
+}
+
+function renderRealtime(events) {
+  if (!events.length) {
+    els.realtimeBody.innerHTML = '<tr><td class="empty" colspan="6">监控已就绪，等待候选标的产生实时事件</td></tr>';
+    return;
+  }
+  const typeLabels = { approaching: "接近", touched: "触及", swept: "穿透", reclaimed: "收回确认", "front-run": "未触及转向" };
+  const evidenceLabels = { high: "高", medium: "中", low: "低" };
+  els.realtimeBody.innerHTML = events.map((event) => {
+    const context = event.context || {};
+    const evidence = event.evidence || {};
+    return `<tr>
+      <td>${fmtDateTime(event.time)}</td>
+      <td class="symbol">${tradingViewLink(event, true)}<small>${event.side === "support" ? "支撑" : "阻力"}</small></td>
+      <td class="${event.type === "reclaimed" ? "positive" : ""}">${escapeHtml(typeLabels[event.type] || event.type)}</td>
+      <td><b>${fmtPrice(event.price)}</b><small>${fmtPrice(event.zoneLow)} - ${fmtPrice(event.zoneHigh)}</small></td>
+      <td><b>${evidenceLabels[evidence.level] || "待观察"} · ${evidence.score ?? 0}</b><small>${escapeHtml((evidence.reasons || []).join("、") || "暂无充分证据")}</small></td>
+      <td><b>OI ${Number.isFinite(Number(context.oiChangePct)) ? `${Number(context.oiChangePct).toFixed(2)}%` : "-"}</b><small>成交 ${fmtUsd(context.tradeVolumeUsd)} · 强平 ${fmtUsd(context.liquidationUsd)}</small></td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadRealtime() {
+  try {
+    const response = await fetch("/api/reversal/realtime?limit=50", { cache: "no-store" });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || "读取失败");
+    els.realtimeStatus.textContent = data.connected
+      ? `在线 · ${data.monitoredSymbols || 0} 个标的 · ${data.candidateCount || 0} 个区域`
+      : "等待实时监控进程";
+    renderRealtime(data.events || []);
+  } catch (error) {
+    els.realtimeStatus.textContent = error.message;
+    renderRealtime([]);
   }
 }
 
@@ -252,4 +297,6 @@ els.symbols.addEventListener("keydown", (event) => {
   if (event.key === "Enter") scan();
 });
 scan();
+loadRealtime();
+setInterval(loadRealtime, 30_000);
 setInterval(scan, 2 * 60 * 60_000);
