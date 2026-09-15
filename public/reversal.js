@@ -111,17 +111,23 @@ function renderRealtime(events) {
     return;
   }
   const typeLabels = { approaching: "接近", touched: "触及", swept: "穿透", reclaimed: "收回确认", "front-run": "未触及转向" };
-  const evidenceLabels = { high: "高", medium: "中", low: "低" };
+  const evidenceLabels = { high: "高", medium: "中", low: "低", watch: "观察中", separate: "抢跑型" };
   els.realtimeBody.innerHTML = events.map((event) => {
     const context = event.context || {};
     const evidence = event.evidence || {};
+    const snapshots = event.followUp?.snapshots || {};
+    const resultText = snapshots["1h"]
+      ? `1小时 ${Number(snapshots["1h"].directionalPct) >= 0 ? "+" : ""}${Number(snapshots["1h"].directionalPct).toFixed(2)}%`
+      : snapshots["15m"]
+        ? `15分钟 ${Number(snapshots["15m"].directionalPct) >= 0 ? "+" : ""}${Number(snapshots["15m"].directionalPct).toFixed(2)}%`
+        : "等待后续表现";
     return `<tr>
       <td>${fmtDateTime(event.time)}</td>
       <td class="symbol">${tradingViewLink(event, true)}<small>${event.side === "support" ? "支撑" : "阻力"}</small></td>
-      <td class="${event.type === "reclaimed" ? "positive" : ""}">${escapeHtml(typeLabels[event.type] || event.type)}</td>
+      <td class="${event.type === "reclaimed" ? "positive" : ""}">${escapeHtml(typeLabels[event.type] || event.type)}<small>${event.eventCount > 1 ? `${event.eventCount} 个阶段` : ""}</small></td>
       <td><b>${fmtPrice(event.price)}</b><small>${fmtPrice(event.zoneLow)} - ${fmtPrice(event.zoneHigh)}</small></td>
       <td><b>${evidenceLabels[evidence.level] || "待观察"} · ${evidence.score ?? 0}</b><small>${escapeHtml((evidence.reasons || []).join("、") || "暂无充分证据")}</small></td>
-      <td><b>OI ${Number.isFinite(Number(context.oiChangePct)) ? `${Number(context.oiChangePct).toFixed(2)}%` : "-"}</b><small>成交 ${fmtUsd(context.tradeVolumeUsd)} · 强平 ${fmtUsd(context.liquidationUsd)}</small></td>
+      <td><b>${resultText}</b><small>OI ${Number.isFinite(Number(context.oiChangePct)) ? `${Number(context.oiChangePct).toFixed(2)}%` : "-"} · 强平 ${fmtUsd(context.liquidationUsd)}</small></td>
     </tr>`;
   }).join("");
 }
@@ -134,7 +140,7 @@ async function loadRealtime() {
     els.realtimeStatus.textContent = data.connected
       ? `在线 · ${data.monitoredSymbols || 0} 个标的 · ${data.candidateCount || 0} 个区域`
       : "等待实时监控进程";
-    renderRealtime(data.events || []);
+    renderRealtime(data.episodes || data.events || []);
   } catch (error) {
     els.realtimeStatus.textContent = error.message;
     renderRealtime([]);

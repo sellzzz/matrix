@@ -191,7 +191,13 @@ function realtimeType(type) {
 }
 
 function buildRealtimeMessage(events) {
-  const rows = events.slice(0, 10).map((event, index) => {
+  const opportunityMap = new Map();
+  for (const event of events) {
+    const key = event.zoneKey || [event.symbol, event.side, event.originTime, event.zoneLow, event.zoneHigh].join(":");
+    if (!opportunityMap.has(key)) opportunityMap.set(key, event);
+  }
+  const opportunities = [...opportunityMap.values()];
+  const rows = opportunities.slice(0, 10).map((event, index) => {
     const support = event.side === "support";
     const chart = tradingViewChart(event);
     const symbol = chart.url
@@ -199,17 +205,18 @@ function buildRealtimeMessage(events) {
       : `<b>${htmlEscape(chart.symbol || event.symbol || "-")}</b>`;
     const evidence = event.evidence || {};
     const context = event.context || {};
-    const evidenceText = ({ high: "高", medium: "中", low: "低" })[evidence.level] || "待观察";
+    const evidenceText = ({ high: "高", medium: "中", low: "低", watch: "观察中", separate: "抢跑型" })[evidence.level] || "待观察";
+    const stageText = ({ confirmed: "已确认", developing: "形成中", watching: "等待触发", "front-run": "单独统计" })[evidence.stage] || "形成中";
     return [
       `${index + 1}. ${symbol} · <b>${realtimeType(event.type)}</b>`,
-      `${support ? "支撑 / 潜在反弹" : "阻力 / 潜在回落"} | 证据 ${evidenceText} (${evidence.score ?? 0})`,
+      `${support ? "支撑 / 潜在反弹" : "阻力 / 潜在回落"} | ${stageText} | 证据 ${evidenceText} (${evidence.score ?? 0})`,
       `价格 ${fmtPrice(event.price)} | 区域 ${fmtPrice(event.zoneLow)} - ${fmtPrice(event.zoneHigh)}`,
       `穿透 ${fmtPct(event.penetrationPct || 0)} | OI ${fmtPct(context.oiChangePct)}`,
       `15分钟成交 ${fmtUsd(context.tradeVolumeUsd)} | 强平 ${fmtUsd(context.liquidationUsd)}`,
       Array.isArray(evidence.reasons) && evidence.reasons.length ? `依据 ${htmlEscape(evidence.reasons.join("、"))}` : "依据 暂无充分猎杀证据",
     ].join("\n");
   });
-  return `<b>Key Zone Realtime</b>\n只做观察，不自动交易\n\n${rows.join("\n\n")}`;
+  return `<b>Key Zone Realtime</b>\n${opportunities.length} 次机会 · ${events.length} 个阶段\n只做观察，不自动交易\n\n${rows.join("\n\n")}`;
 }
 
 function buildTradingViewWatchlist(records) {

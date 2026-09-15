@@ -14,6 +14,14 @@ export function distanceFromZonePct(price, candidate) {
   return 0;
 }
 
+export function directionalReturnPct(side, entryPrice, currentPrice) {
+  const entry = Number(entryPrice);
+  const current = Number(currentPrice);
+  if (![entry, current].every(Number.isFinite) || entry <= 0) return null;
+  const raw = ((current - entry) / entry) * 100;
+  return side === "support" ? raw : -raw;
+}
+
 export function createZoneRuntime(candidate) {
   return {
     candidate,
@@ -111,6 +119,12 @@ export function processZonePrice(runtime, rawPrice, at = Date.now()) {
 }
 
 export function summarizeEvidence(runtime, context = {}, eventType = runtime.phase) {
+  if (eventType === "approaching") {
+    return { score: 0, level: "watch", stage: "watching", reasons: ["等待触及或转向"] };
+  }
+  if (eventType === "front-run") {
+    return { score: 0, level: "separate", stage: "front-run", reasons: ["未触及区域，单独统计"] };
+  }
   const reclaimSeconds = Number(context.reclaimSeconds);
   const penetrationPct = Number(context.penetrationPct ?? runtime.maximumPenetrationPct);
   const oiChangePct = Number(context.oiChangePct);
@@ -138,6 +152,7 @@ export function summarizeEvidence(runtime, context = {}, eventType = runtime.pha
   return {
     score,
     level: score >= 5 ? "high" : score >= 3 ? "medium" : "low",
+    stage: eventType === "reclaimed" ? "confirmed" : "developing",
     reasons,
   };
 }
