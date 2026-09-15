@@ -60,16 +60,24 @@
       </section>
 
       <section class="panel reversalWatchPanel">
-        <div class="panelHead"><div><h2>观察列表</h2><p>没有触发实时信号时，标的仍保留在观察中。</p></div></div>
-        <div class="tableWrap"><table class="reversalTable"><thead><tr><th>标的</th><th>市场</th><th>状态</th><th>当前价</th><th>区域</th><th>区域年龄</th><th>错误</th></tr></thead><tbody id="watchBody"></tbody></table></div>
-      </section>
-
-      <section class="panel reversalWatchPanel">
         <div class="panelHead">
           <div><h2>实时区域观察</h2><p>候选标的秒级监听；记录接近、触及、穿透、收回和未触及转向。</p></div>
           <span id="realtimeStatus" class="macroSource">等待监控进程</span>
         </div>
+        <div id="realtimeSummary" class="realtimeSummary" aria-label="实时确认表现"></div>
         <div class="tableWrap"><table class="reversalTable"><thead><tr><th>时间</th><th>标的</th><th>事件</th><th>价格 / 区域</th><th>猎杀证据</th><th>实时数据</th></tr></thead><tbody id="realtimeBody"></tbody></table></div>
+      </section>
+
+      <section class="panel reversalWatchPanel">
+        <div class="panelHead">
+          <div><h2>观察列表</h2><p>保留全部扫描结果，默认分批显示以减少页面负担。</p></div>
+          <div class="watchTools">
+            <input id="watchFilter" type="search" placeholder="搜索标的、市场或状态" aria-label="搜索观察列表" />
+            <span id="watchStatus" class="macroSource">等待扫描</span>
+            <button id="watchMoreBtn" type="button" class="secondary" hidden>显示更多</button>
+          </div>
+        </div>
+        <div class="tableWrap"><table class="reversalTable"><thead><tr><th>标的</th><th>市场</th><th>状态</th><th>当前价</th><th>区域</th><th>区域年龄</th><th>错误</th></tr></thead><tbody id="watchBody"></tbody></table></div>
       </section>
 
       <section class="panel reversalWatchPanel reversalHistoryPanel">

@@ -900,6 +900,54 @@ dialog::backdrop {
   margin-top: 14px;
 }
 
+.watchTools {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.watchTools input {
+  width: min(260px, 36vw);
+  height: 38px;
+  padding: 0 11px;
+}
+
+.watchTools button {
+  min-height: 38px;
+  padding: 0 13px;
+}
+
+.realtimeSummary {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.realtimeSummary div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #14253a;
+}
+
+.realtimeSummary span,
+.realtimeSummary small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.realtimeSummary strong {
+  color: #f4f7fb;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+
 .reversalTable {
   min-width: 820px;
 }
@@ -1684,7 +1732,8 @@ dialog {
 
 @media (max-width: 760px) {
   .reversalStatsForm,
-  .reversalStatsSummary { grid-template-columns: 1fr; }
+  .reversalStatsSummary,
+  .realtimeSummary { grid-template-columns: 1fr; }
 
   .reversalSignalPanel .panelHead {
     flex-direction: column;
@@ -1696,6 +1745,18 @@ dialog {
   }
 
   .statsTimeline { grid-template-columns: repeat(10, minmax(18px, 1fr)); }
+
+  .watchTools {
+    width: 100%;
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+
+  .watchTools input { width: 100%; }
+}
+
+@media (min-width: 761px) and (max-width: 1180px) {
+  .realtimeSummary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 
 @media (min-width: 761px) and (max-width: 1080px) {

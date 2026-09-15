@@ -22,6 +22,66 @@ export function directionalReturnPct(side, entryPrice, currentPrice) {
   return side === "support" ? raw : -raw;
 }
 
+export function groupZoneEvents(events = []) {
+  const episodeMap = new Map();
+  const sorted = [...events].sort((a, b) => Number(b?.time || 0) - Number(a?.time || 0));
+  for (const event of sorted) {
+    const key = event.zoneKey || [event.symbol, event.side, event.originTime, event.zoneLow, event.zoneHigh].join(":");
+    const episode = episodeMap.get(key);
+    if (!episode) {
+      episodeMap.set(key, {
+        ...event,
+        zoneKey: key,
+        startedAt: event.time,
+        updatedAt: event.time,
+        stages: [event.type],
+        eventCount: 1,
+      });
+      continue;
+    }
+    episode.startedAt = Math.min(episode.startedAt, event.time);
+    episode.updatedAt = Math.max(episode.updatedAt, event.time);
+    episode.eventCount += 1;
+    if (!episode.stages.includes(event.type)) episode.stages.push(event.type);
+    if (!episode.followUp && event.followUp) episode.followUp = event.followUp;
+    if (Number(event.evidence?.score || 0) > Number(episode.evidence?.score || 0)) episode.evidence = event.evidence;
+  }
+  for (const episode of episodeMap.values()) {
+    if (episode.stages.includes("reclaimed")) episode.evidence = { ...episode.evidence, stage: "confirmed" };
+    else if (episode.stages.includes("front-run")) episode.evidence = { ...episode.evidence, stage: "front-run" };
+  }
+  return [...episodeMap.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export function summarizeFollowUpEpisodes(episodes = []) {
+  const confirmed = episodes.filter((episode) => episode.stages?.includes("reclaimed"));
+  const tracked = confirmed.filter((episode) => episode.followUp);
+  const horizons = {};
+  for (const label of ["5m", "15m", "1h", "4h"]) {
+    const values = confirmed
+      .map((episode) => Number(episode.followUp?.snapshots?.[label]?.directionalPct))
+      .filter(Number.isFinite);
+    const positive = values.filter((value) => value > 0).length;
+    horizons[label] = {
+      samples: values.length,
+      positive,
+      positiveRate: values.length ? positive / values.length : null,
+      averageDirectionalPct: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null,
+    };
+  }
+  const completed = confirmed.filter((episode) => episode.followUp?.snapshots?.["4h"]);
+  const average = (values) => values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : null;
+  return {
+    confirmed: confirmed.length,
+    tracking: tracked.filter((episode) => !episode.followUp?.snapshots?.["4h"]).length,
+    legacyUntracked: confirmed.length - tracked.length,
+    completed: completed.length,
+    averageMaxFavorablePct: average(completed.map((episode) => Number(episode.followUp?.maxFavorablePct)).filter(Number.isFinite)),
+    averageMaxAdversePct: average(completed.map((episode) => Number(episode.followUp?.maxAdversePct)).filter(Number.isFinite)),
+    horizons,
+  };
+}
+
 export function createZoneRuntime(candidate) {
   return {
     candidate,

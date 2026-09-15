@@ -8,17 +8,19 @@ const els = {
   updated: $("updated"),
   status: $("status"),
   signalList: $("signalList"),
-  watchBody: $("watchBody"),
+  watchBody: $("watchBody"), watchFilter: $("watchFilter"), watchStatus: $("watchStatus"), watchMoreBtn: $("watchMoreBtn"),
   historyBody: $("historyBody"),
   historyStatus: $("historyStatus"),
   statsBtn: $("statsBtn"), statsHorizon: $("statsHorizon"), statsTarget: $("statsTarget"), statsStatus: $("statsStatus"), statsSummary: $("statsSummary"),
   statsOutcomeBar: $("statsOutcomeBar"), statsTimeline: $("statsTimeline"),
   exportStatsBtn: $("exportStatsBtn"),
   manualPushBtn: $("manualPushBtn"), manualPushStatus: $("manualPushStatus"),
-  realtimeBody: $("realtimeBody"), realtimeStatus: $("realtimeStatus"),
+  realtimeBody: $("realtimeBody"), realtimeStatus: $("realtimeStatus"), realtimeSummary: $("realtimeSummary"),
 };
 let latestStats = null;
 let latestSignals = [];
+let latestWatchRows = [];
+let watchVisibleLimit = 80;
 
 let controller = null;
 
@@ -132,6 +134,26 @@ function renderRealtime(events) {
   }).join("");
 }
 
+function renderRealtimeSummary(summary = {}) {
+  const followUp = summary.followUp || {};
+  const fmtHorizon = (label) => {
+    const row = followUp.horizons?.[label];
+    if (!row?.samples) return ["-", "暂无完整样本"];
+    const rate = `${(Number(row.positiveRate) * 100).toFixed(0)}%`;
+    const average = Number(row.averageDirectionalPct);
+    return [rate, `${row.samples} 个样本 · 平均 ${average >= 0 ? "+" : ""}${average.toFixed(2)}%`];
+  };
+  const cards = [
+    ["收回确认", followUp.confirmed ?? 0, `${followUp.tracking ?? 0} 个跟踪中${followUp.legacyUntracked ? ` · ${followUp.legacyUntracked} 个旧记录` : ""}`],
+    ["5 分钟顺向率", ...fmtHorizon("5m")],
+    ["15 分钟顺向率", ...fmtHorizon("15m")],
+    ["1 小时顺向率", ...fmtHorizon("1h")],
+    ["4 小时顺向率", ...fmtHorizon("4h")],
+    ["完成样本波动", followUp.completed ? `+${Number(followUp.averageMaxFavorablePct || 0).toFixed(2)}%` : "-", followUp.completed ? `${followUp.completed} 个 · 最大不利均值 ${Number(followUp.averageMaxAdversePct || 0).toFixed(2)}%` : "等待 4 小时样本"],
+  ];
+  els.realtimeSummary.innerHTML = cards.map(([label, value, detail]) => `<div><span>${label}</span><strong>${value}</strong><small>${detail}</small></div>`).join("");
+}
+
 async function loadRealtime() {
   try {
     const response = await fetch("/api/reversal/realtime?limit=50", { cache: "no-store" });
@@ -140,9 +162,11 @@ async function loadRealtime() {
     els.realtimeStatus.textContent = data.connected
       ? `在线 · ${data.monitoredSymbols || 0} 个标的 · ${data.candidateCount || 0} 个区域`
       : "等待实时监控进程";
+    renderRealtimeSummary(data.summary);
     renderRealtime(data.episodes || data.events || []);
   } catch (error) {
     els.realtimeStatus.textContent = error.message;
+    renderRealtimeSummary();
     renderRealtime([]);
   }
 }
@@ -203,24 +227,46 @@ function renderSignals(signals) {
   }).join("");
 }
 
-function renderWatch(rows) {
-  if (!rows.length) {
+function watchStateLabel(row) {
+  if (row.status === "approaching") return "接近预警";
+  if (["revisit", "second-touch"].includes(row.status)) return "重新进入";
+  if (row.status === "error") return "读取失败";
+  return "观察中";
+}
+
+function renderWatch() {
+  const query = els.watchFilter.value.trim().toUpperCase();
+  const filtered = query ? latestWatchRows.filter((row) =>
+    [row.symbol, row.tradingViewSymbol, row.market, watchStateLabel(row), row.error]
+      .some((value) => String(value || "").toUpperCase().includes(query))) : latestWatchRows;
+  const visible = filtered.slice(0, watchVisibleLimit);
+  els.watchStatus.textContent = query
+    ? `匹配 ${filtered.length} 个 · 显示 ${visible.length} 个`
+    : `共 ${latestWatchRows.length} 个 · 显示 ${visible.length} 个`;
+  els.watchMoreBtn.hidden = visible.length >= filtered.length;
+  if (!filtered.length) {
     els.watchBody.innerHTML = '<tr><td class="empty" colspan="7">没有观察标的</td></tr>';
     return;
   }
-  els.watchBody.innerHTML = rows.map((row) => {
+  els.watchBody.innerHTML = visible.map((row) => {
     const firstTouch = ["revisit", "second-touch", "approaching"].includes(row.status);
     const zone = row.zones?.[0];
     return `<tr>
       <td class="symbol">${tradingViewLink(row, true)}<small>${escapeHtml(row.symbol)}</small></td>
       <td>${escapeHtml(row.market)}</td>
-      <td class="${firstTouch ? "positive" : ""}">${firstTouch ? (row.status === "approaching" ? "接近预警" : "重新进入") : row.status === "error" ? "读取失败" : "观察中"}</td>
+      <td class="${firstTouch ? "positive" : ""}">${watchStateLabel(row)}</td>
       <td>${fmtPrice(row.current?.price)}</td>
       <td>${zone ? `${fmtPrice(zone.zoneLow)} - ${fmtPrice(zone.zoneHigh)}` : "-"}</td>
       <td>${zone ? `${zone.ageDays ?? zone.ageBars} ${zone.ageDays != null ? "天" : "根"}` : "-"}</td>
       <td>${escapeHtml(row.error || "-")}</td>
     </tr>`;
   }).join("");
+}
+
+function setWatchRows(rows) {
+  latestWatchRows = Array.isArray(rows) ? rows : [];
+  watchVisibleLimit = 80;
+  renderWatch();
 }
 
 async function scan() {
@@ -241,7 +287,7 @@ async function scan() {
     els.manualPushBtn.disabled = latestSignals.length === 0;
     els.manualPushStatus.textContent = latestSignals.length ? `可手动推送 ${latestSignals.length} 条` : "人工判断 · 不自动交易";
     renderSignals(data.signals);
-    renderWatch(data.rows);
+    setWatchRows(data.rows);
     await loadHistory();
   } catch (error) {
     if (error.name === "AbortError") return;
@@ -250,7 +296,7 @@ async function scan() {
     els.manualPushBtn.disabled = true;
     els.manualPushStatus.textContent = "扫描失败";
     els.signalList.innerHTML = '<div class="emptySignal">扫描失败，请稍后重试</div>';
-    renderWatch([]);
+    setWatchRows([]);
   } finally {
     els.refreshBtn.disabled = false;
   }
@@ -284,6 +330,14 @@ async function manualPush() {
 els.refreshBtn.addEventListener("click", scan);
 els.manualPushBtn.addEventListener("click", manualPush);
 els.statsBtn.addEventListener("click", loadStats);
+els.watchFilter.addEventListener("input", () => {
+  watchVisibleLimit = 80;
+  renderWatch();
+});
+els.watchMoreBtn.addEventListener("click", () => {
+  watchVisibleLimit += 100;
+  renderWatch();
+});
 els.exportStatsBtn.addEventListener("click", () => {
   if (!latestStats?.records?.length) return;
   const headers = ["symbol", "tradingViewSymbol", "chartUrl", "market", "type", "status", "originTime", "originPoint", "triggerTime", "entry", "zoneLow", "zoneHigh", "triggerOpen", "triggerHigh", "triggerLow", "triggerClose", "outcome", "barsToOutcome", "maxFavorablePct", "maxAdversePct"];

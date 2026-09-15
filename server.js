@@ -7,6 +7,7 @@ import { Interface } from "ethers";
 import { config } from "./src/config.js";
 import { createJsonStore } from "./src/json-store.js";
 import { createRouter } from "./src/router.js";
+import { groupZoneEvents, summarizeFollowUpEpisodes } from "./src/realtime-zone-engine.js";
 
 const packageMeta = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
 const SERVER_STARTED_AT = new Date().toISOString();
@@ -955,41 +956,18 @@ async function handleReversalRealtime(req, res) {
     const url = new URL(req.url, `http://${req.headers.host}`);
     const limit = parseInteger(url.searchParams.get("limit"), 100, 1, 500);
     const allEvents = Array.isArray(parsed.events) ? parsed.events : [];
-    const episodeMap = new Map();
-    for (const event of allEvents) {
-      const key = event.zoneKey || [event.symbol, event.side, event.originTime, event.zoneLow, event.zoneHigh].join(":");
-      const episode = episodeMap.get(key);
-      if (!episode) {
-        episodeMap.set(key, {
-          ...event,
-          zoneKey: key,
-          startedAt: event.time,
-          updatedAt: event.time,
-          stages: [event.type],
-          eventCount: 1,
-        });
-        continue;
-      }
-      episode.startedAt = Math.min(episode.startedAt, event.time);
-      episode.updatedAt = Math.max(episode.updatedAt, event.time);
-      episode.eventCount += 1;
-      if (!episode.stages.includes(event.type)) episode.stages.push(event.type);
-      if (Number(event.evidence?.score || 0) > Number(episode.evidence?.score || 0)) episode.evidence = event.evidence;
-    }
-    for (const episode of episodeMap.values()) {
-      if (episode.stages.includes("reclaimed")) episode.evidence = { ...episode.evidence, stage: "confirmed" };
-      else if (episode.stages.includes("front-run")) episode.evidence = { ...episode.evidence, stage: "front-run" };
-    }
-    const episodes = [...episodeMap.values()].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, limit);
+    const allEpisodes = groupZoneEvents(allEvents);
+    const episodes = allEpisodes.slice(0, limit);
     json(res, 200, {
       ...parsed,
       events: allEvents.slice(0, limit),
       episodes,
       summary: {
         rawEvents: allEvents.length,
-        episodes: episodeMap.size,
-        highEvidence: episodes.filter((episode) => episode.evidence?.level === "high").length,
-        mediumEvidence: episodes.filter((episode) => episode.evidence?.level === "medium").length,
+        episodes: allEpisodes.length,
+        highEvidence: allEpisodes.filter((episode) => episode.evidence?.level === "high").length,
+        mediumEvidence: allEpisodes.filter((episode) => episode.evidence?.level === "medium").length,
+        followUp: summarizeFollowUpEpisodes(allEpisodes),
       },
     });
   } catch {
