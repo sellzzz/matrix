@@ -1,55 +1,73 @@
-# GitHub 方式部署到服务器
+# Matrix 服务器部署
 
-不要把服务器密码或 GitHub token 发给 AI。下面命令在你自己的终端执行。
+运行目录：`/opt/binance-dashboard`
 
-## 1. 本地推送到 GitHub
+GitHub：`https://github.com/sellzzz/matrix.git`
 
-在本地项目目录：
+分支：`master`
 
-```powershell
-cd C:\Users\047\Documents\合约
-git add server.js package.json package-lock.json public .gitignore README.md deploy-server.md start-dashboard.ps1 start-dashboard.cmd
-git commit -m "Add market data dashboard"
-git branch -M main
-git remote add origin https://github.com/<你的用户名>/<你的仓库>.git
-git push -u origin main
-```
+不要把服务器密码、GitHub Token 或 `telegram.env` 提交到仓库。
 
-如果已经有 remote：
-
-```powershell
-git remote set-url origin https://github.com/<你的用户名>/<你的仓库>.git
-git push -u origin main
-```
-
-## 2. 服务器拉取
-
-登录服务器后：
+## 首次部署
 
 ```bash
 cd /opt
-git clone https://github.com/<你的用户名>/<你的仓库>.git market-dashboard
-cd market-dashboard
+git clone https://github.com/sellzzz/matrix.git binance-dashboard
+cd /opt/binance-dashboard
 npm install --omit=dev
-PORT=8787 npm start
 ```
 
-## 3. 后台运行
+启动三个独立进程：
 
 ```bash
-npm install -g pm2
-cd /opt/market-dashboard
-PORT=8787 pm2 start server.js --name market-dashboard
+PORT=8787 pm2 start server.js --name binance-dashboard
+pm2 start npm --name key-zone-realtime -- run monitor:realtime
+pm2 start npm --name market-signal-push -- run notify:telegram
 pm2 save
 ```
 
-## 4. 更新
+不要再启动 `market-dashboard`。它和 `binance-dashboard` 使用同一个端口，会产生 `EADDRINUSE`。
 
-以后本地改完推送后，在服务器：
+## 更新服务器
 
 ```bash
-cd /opt/market-dashboard
-git pull
+cd /opt/binance-dashboard
+git pull origin master
 npm install --omit=dev
-pm2 restart market-dashboard
+git rev-parse --short HEAD
+pm2 restart binance-dashboard --update-env
+pm2 restart key-zone-realtime --update-env
+pm2 restart market-signal-push --update-env
+pm2 save
+```
+
+## 验证
+
+```bash
+curl -s http://127.0.0.1:8787/api/health
+curl -s "http://127.0.0.1:8787/api/reversal/realtime?limit=1"
+pm2 status
+```
+
+健康检查中的 `application.version` 应与当前发布版本一致；实时接口应返回 `schemaVersion: 2`、`policy`、`summary` 和 `connected: true`。
+
+日志中旧的错误不会自动消失。只看重启后的新日志：
+
+```bash
+pm2 flush
+pm2 logs binance-dashboard --lines 30
+pm2 logs key-zone-realtime --lines 30
+```
+
+## Telegram 配置
+
+`telegram.env` 只保存在服务器，不提交 Git。更新代码不会删除它：
+
+```bash
+cd /opt/binance-dashboard
+set -a
+source ./telegram.env
+set +a
+pm2 restart market-signal-push --update-env
+pm2 save
 ```

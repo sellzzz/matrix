@@ -1,4 +1,5 @@
 import http from "node:http";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize, resolve, sep } from "node:path";
 import { ProxyAgent, setGlobalDispatcher } from "undici";
@@ -6,6 +7,10 @@ import { Interface } from "ethers";
 import { config } from "./src/config.js";
 import { createJsonStore } from "./src/json-store.js";
 import { createRouter } from "./src/router.js";
+
+const packageMeta = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
+const SERVER_STARTED_AT = new Date().toISOString();
+const REALTIME_SCHEMA_VERSION = 2;
 
 const { port: PORT, publicDir: PUBLIC_DIR, binanceFapi: BINANCE_FAPI, coingeckoApi: COINGECKO_API, dexscreenerApi: DEXSCREENER_API, bscRpc: BSC_RPC, cacheMs: CACHE_MS, macroCacheMs: MACRO_CACHE_MS, fetchTimeoutMs: FETCH_TIMEOUT_MS, maxScanCache: MAX_SCAN_CACHE, reversalCacheMs: REVERSAL_CACHE_MS, reversalTopFutures: REVERSAL_TOP_FUTURES, reversalMaxAssets: REVERSAL_MAX_ASSETS, reversalHistoryFile: REVERSAL_HISTORY_FILE, reversalHistoryLimit: REVERSAL_HISTORY_LIMIT, reversalManualPushFile: REVERSAL_MANUAL_PUSH_FILE, reversalCandidateFile: REVERSAL_CANDIDATE_FILE, reversalRealtimeFile: REVERSAL_REALTIME_FILE, onchainAlertsFile: ONCHAIN_ALERTS_FILE, onchainAlertLimit: ONCHAIN_ALERT_LIMIT, onchainPriceCacheMs: ONCHAIN_PRICE_CACHE_MS, onchainCheckConcurrency: ONCHAIN_CHECK_CONCURRENCY, reversalSignalCooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, fredApi: FRED_API, treasuryCurveCsv: TREASURY_CURVE_CSV, cmeFedwatchApi: CME_FEDWATCH_API, concurrency: CONCURRENCY } = config;
 
@@ -2044,6 +2049,13 @@ async function handleLiquidityRange(req, res) {
 function handleHealth(req, res) {
   json(res, 200, {
     status: "ok",
+    application: {
+      name: packageMeta.name,
+      version: process.env.APP_RELEASE || packageMeta.version,
+      strategyVersion: REVERSAL_STRATEGY_VERSION,
+      realtimeSchemaVersion: REALTIME_SCHEMA_VERSION,
+      startedAt: SERVER_STARTED_AT,
+    },
     uptimeSeconds: Math.round(process.uptime()),
     generatedAt: new Date().toISOString(),
     caches: {
@@ -2127,7 +2139,7 @@ const dispatchRequest = createRouter({
 const server = http.createServer(dispatchRequest);
 
 server.listen(PORT, () => {
-  console.log(`OI dashboard running at http://localhost:${PORT}`);
+  console.log(`Matrix dashboard running at http://localhost:${PORT}`);
   const runAutomaticReversalScan = async () => {
     try {
       const requested = await getDefaultReversalAssets();

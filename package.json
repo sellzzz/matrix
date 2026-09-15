@@ -1,6 +1,6 @@
 {
-  "name": "market-data-dashboard",
-  "version": "1.0.0",
+  "name": "matrix",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "scripts": {
