@@ -11,6 +11,7 @@ const els = {
   watchBody: $("watchBody"), watchFilter: $("watchFilter"), watchStatus: $("watchStatus"), watchMoreBtn: $("watchMoreBtn"),
   historyBody: $("historyBody"),
   historyStatus: $("historyStatus"),
+  dailyReviewBtn: $("dailyReviewBtn"),
   statsBtn: $("statsBtn"), statsHorizon: $("statsHorizon"), statsTarget: $("statsTarget"), statsStatus: $("statsStatus"), statsSummary: $("statsSummary"),
   statsOutcomeBar: $("statsOutcomeBar"), statsTimeline: $("statsTimeline"),
   exportStatsBtn: $("exportStatsBtn"),
@@ -49,6 +50,105 @@ function fmtDate(value) {
 function fmtDateTime(value) {
   if (!value) return "-";
   return new Intl.DateTimeFormat("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" }).format(new Date(value));
+}
+
+function shanghaiDateKey(value = Date.now()) {
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(value));
+}
+
+function plainDirection(row) {
+  return row.type === "support-touch" || row.side === "support" ? "支撑 / 潜在反弹" : "阻力 / 潜在回落";
+}
+
+function buildDailyReviewText(records, episodes, dateKey) {
+  const typeLabels = { approaching: "接近", touched: "触及", swept: "穿透", reclaimed: "收回确认", "front-run": "未触及转向" };
+  const todayRecords = records
+    .filter((row) => shanghaiDateKey(row.recordedAt || row.triggerTime || row.touchTime) === dateKey)
+    .sort((a, b) => new Date(a.recordedAt || 0) - new Date(b.recordedAt || 0));
+  const todayEpisodes = episodes
+    .filter((row) => shanghaiDateKey(row.updatedAt || row.time) === dateKey)
+    .sort((a, b) => Number(a.updatedAt || a.time || 0) - Number(b.updatedAt || b.time || 0));
+  const symbols = [...new Set([...todayRecords, ...todayEpisodes].map((row) => tradingViewMeta(row).tvSymbol || row.symbol).filter(Boolean))];
+  const rows = new Map();
+  for (const record of todayRecords) {
+    const symbol = tradingViewMeta(record).tvSymbol || record.symbol || "-";
+    const items = rows.get(symbol) || [];
+    items.push([
+      `[信号] ${fmtDateTime(record.recordedAt)} · ${record.status === "approaching" ? "接近预警" : "重新进入"}`,
+      `方向: ${plainDirection(record)}`,
+      `价格: ${fmtPrice(record.triggerPrice ?? record.current?.price)} | 区域: ${fmtPrice(record.zoneLow)} - ${fmtPrice(record.zoneHigh)}`,
+      `日线锚点: ${fmtDateTime(record.originTime)} | 4小时触发: ${fmtDateTime(record.triggerTime || record.touchTime)}`,
+    ].join("\n"));
+    rows.set(symbol, items);
+  }
+  for (const episode of todayEpisodes) {
+    const symbol = tradingViewMeta(episode).tvSymbol || episode.symbol || "-";
+    const items = rows.get(symbol) || [];
+    const evidence = episode.evidence || {};
+    const context = episode.context || {};
+    const snapshots = episode.followUp?.snapshots || {};
+    const outcomes = ["5m", "15m", "1h", "4h"]
+      .filter((label) => Number.isFinite(Number(snapshots[label]?.directionalPct)))
+      .map((label) => `${label} ${Number(snapshots[label].directionalPct) >= 0 ? "+" : ""}${Number(snapshots[label].directionalPct).toFixed(2)}%`)
+      .join(" | ") || "等待后续表现";
+    items.push([
+      `[实时] ${fmtDateTime(episode.updatedAt || episode.time)} · ${(episode.stages || [episode.type]).slice().reverse().map((type) => typeLabels[type] || type).join(" -> ")}`,
+      `方向: ${plainDirection(episode)} | 证据: ${evidence.level || "待观察"} (${evidence.score ?? 0})`,
+      `价格: ${fmtPrice(episode.price)} | 区域: ${fmtPrice(episode.zoneLow)} - ${fmtPrice(episode.zoneHigh)}`,
+      `依据: ${(evidence.reasons || []).join("、") || "暂无充分猎杀证据"}`,
+      `OI: ${Number.isFinite(Number(context.oiChangePct)) ? `${Number(context.oiChangePct).toFixed(2)}%` : "-"} | 强平: ${fmtUsd(context.liquidationUsd)} | 15分钟成交: ${fmtUsd(context.tradeVolumeUsd)}`,
+      `后续: ${outcomes}`,
+    ].join("\n"));
+    rows.set(symbol, items);
+  }
+  const details = [...rows.entries()].map(([symbol, items], index) => `${index + 1}. ${symbol}\n${items.join("\n\n")}`).join("\n\n--------------------\n\n");
+  return [
+    `Matrix 关键区域每日复核`,
+    `日期: ${dateKey}（北京时间）`,
+    `关键区域记录: ${todayRecords.length} | 实时机会: ${todayEpisodes.length} | 去重标的: ${symbols.length}`,
+    `说明: 顺向表现仅用于指标复核，不代表真实成交或交易收益。`,
+    "",
+    details || "今天暂时没有已记录的关键区域信号或实时事件。",
+    "",
+    `TradingView 自选列表（可单独复制导入）:`,
+    symbols.join(",") || "-",
+  ].join("\n");
+}
+
+async function downloadDailyReview() {
+  els.dailyReviewBtn.disabled = true;
+  const originalText = els.dailyReviewBtn.textContent;
+  els.dailyReviewBtn.textContent = "聚合中";
+  try {
+    const [historyResponse, realtimeResponse] = await Promise.all([
+      fetch("/api/reversal/history?limit=500", { cache: "no-store" }),
+      fetch("/api/reversal/realtime?limit=500", { cache: "no-store" }),
+    ]);
+    const history = await historyResponse.json();
+    const realtime = await realtimeResponse.json();
+    if (!historyResponse.ok) throw new Error(history.error || "读取信号记录失败");
+    if (!realtimeResponse.ok) throw new Error(realtime.error || "读取实时记录失败");
+    const dateKey = shanghaiDateKey();
+    const text = buildDailyReviewText(history.records || [], realtime.episodes || realtime.events || [], dateKey);
+    const blob = new Blob(["\ufeff" + text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `matrix-key-zone-review-${dateKey}.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+    els.historyStatus.textContent = `已生成 ${dateKey} 聚合文件`;
+  } catch (error) {
+    els.historyStatus.textContent = error.message;
+  } finally {
+    els.dailyReviewBtn.disabled = false;
+    els.dailyReviewBtn.textContent = originalText;
+  }
 }
 
 function tradingViewMeta(row) {
@@ -329,6 +429,7 @@ async function manualPush() {
 
 els.refreshBtn.addEventListener("click", scan);
 els.manualPushBtn.addEventListener("click", manualPush);
+els.dailyReviewBtn.addEventListener("click", downloadDailyReview);
 els.statsBtn.addEventListener("click", loadStats);
 els.watchFilter.addEventListener("input", () => {
   watchVisibleLimit = 80;
