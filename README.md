@@ -166,8 +166,15 @@ Optional overrides:
 ```bash
 SIGNAL_SCAN_URL='http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=30&maxSymbols=500'
 SMALLCAP_SCAN_URL='http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=0&maxSymbols=500&smallCapMaxUsd=100000000&smallCapMinChange=30'
-REVERSAL_HISTORY_URL='http://127.0.0.1:8787/api/reversal/history?limit=100'
-REVERSAL_REALTIME_URL='http://127.0.0.1:8787/api/reversal/realtime?limit=100'
+REVERSAL_HISTORY_URL='http://127.0.0.1:8787/api/reversal/history?limit=500'
+REVERSAL_REALTIME_URL='http://127.0.0.1:8787/api/reversal/realtime?limit=500'
+DAILY_KEY_ZONE_REPORT_HOUR=9
 SIGNAL_INTERVAL_MS=3600000
 TELEGRAM_POLL_INTERVAL_MS=60000
+```
+
+The notifier sends one aggregated key-zone review for the previous 24 hours at the configured Beijing-time hour. To send that daily report immediately:
+
+```bash
+npm run notify:telegram -- --daily-summary
 ```

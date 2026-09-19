@@ -71,3 +71,12 @@ set +a
 pm2 restart market-signal-push --update-env
 pm2 save
 ```
+
+每日标的总结默认在北京时间 09:00 推送。可在 `telegram.env` 设置 `DAILY_KEY_ZONE_REPORT_HOUR=9`，或随时手动推送一次：
+
+```bash
+set -a
+source ./telegram.env
+set +a
+npm run notify:telegram -- --daily-summary
+```

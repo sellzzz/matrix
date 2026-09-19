@@ -5,8 +5,8 @@ const DEFAULT_SCAN_URL =
   "http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=30&maxSymbols=500";
 const DEFAULT_SMALLCAP_SCAN_URL =
   "http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=0&maxSymbols=500&smallCapMaxUsd=100000000&smallCapMinChange=30";
-const DEFAULT_REVERSAL_HISTORY_URL = "http://127.0.0.1:8787/api/reversal/history?limit=100";
-const DEFAULT_REVERSAL_REALTIME_URL = "http://127.0.0.1:8787/api/reversal/realtime?limit=100";
+const DEFAULT_REVERSAL_HISTORY_URL = "http://127.0.0.1:8787/api/reversal/history?limit=500";
+const DEFAULT_REVERSAL_REALTIME_URL = "http://127.0.0.1:8787/api/reversal/realtime?limit=500";
 const DEFAULT_ONCHAIN_EVENTS_URL = "http://127.0.0.1:8787/api/onchain/alerts/events";
 const DEFAULT_MANUAL_PUSH_URL = "http://127.0.0.1:8787/api/reversal/manual-push";
 const DEFAULT_INTERVAL_MS = 60 * 60 * 1000;
@@ -23,9 +23,12 @@ const manualPushUrl = process.env.REVERSAL_MANUAL_PUSH_URL || DEFAULT_MANUAL_PUS
 const reversalStateFile = process.env.REVERSAL_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-reversal-state.json");
 const realtimeStateFile = process.env.REVERSAL_REALTIME_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-realtime-state.json");
 const onchainStateFile = process.env.ONCHAIN_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-onchain-state.json");
+const dailySummaryStateFile = process.env.DAILY_KEY_ZONE_STATE_FILE || join(process.cwd(), "data", "telegram-daily-key-zone-state.json");
 const summaryIntervalMs = Math.max(60_000, Number(process.env.SIGNAL_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
 const pollIntervalMs = Math.max(15_000, Number(process.env.TELEGRAM_POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS);
-const once = process.argv.includes("--once");
+const dailySummaryHour = Math.min(23, Math.max(0, Number.parseInt(process.env.DAILY_KEY_ZONE_REPORT_HOUR || "9", 10) || 0));
+const forceDailySummary = process.argv.includes("--daily-summary");
+const once = process.argv.includes("--once") || forceDailySummary;
 const REQUEST_TIMEOUT_MS = 15_000;
 let lastSummaryAt = 0;
 
@@ -77,6 +80,23 @@ function fmtTime(value) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function shanghaiDateKey(value = Date.now()) {
+  return new Intl.DateTimeFormat("sv-SE", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(new Date(value));
+}
+
+function shanghaiHour(value = Date.now()) {
+  return Number(new Intl.DateTimeFormat("en-US", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).format(new Date(value)));
 }
 
 function fmtPrice(value) {
@@ -238,6 +258,77 @@ function watchlistFilename() {
   return `tradingview-key-zone-${timestamp}.txt`;
 }
 
+function dailySummaryFilename(dateKey) {
+  return `matrix-key-zone-daily-${dateKey}.txt`;
+}
+
+function dailyWatchlistFilename(dateKey) {
+  return `tradingview-key-zone-daily-${dateKey}.txt`;
+}
+
+function plainDirection(row) {
+  return row.type === "support-touch" || row.side === "support" ? "支撑 / 潜在反弹" : "阻力 / 潜在回落";
+}
+
+function buildDailyKeyZoneSummary(historyData, realtimeData, now = Date.now()) {
+  const since = now - 24 * 60 * 60 * 1000;
+  const records = (Array.isArray(historyData.records) ? historyData.records : [])
+    .filter((row) => new Date(row.recordedAt || row.triggerTime || row.touchTime).getTime() >= since);
+  const episodes = (Array.isArray(realtimeData.episodes) ? realtimeData.episodes : Array.isArray(realtimeData.events) ? realtimeData.events : [])
+    .filter((row) => Number(row.updatedAt || row.time || 0) >= since);
+  const grouped = new Map();
+  const add = (row, text) => {
+    const symbol = tradingViewChart(row).symbol || row.symbol || "-";
+    const items = grouped.get(symbol) || [];
+    items.push(text);
+    grouped.set(symbol, items);
+  };
+  for (const record of records.sort((a, b) => new Date(a.recordedAt || 0) - new Date(b.recordedAt || 0))) {
+    add(record, [
+      `[信号] ${fmtTime(record.recordedAt)} · ${record.status === "approaching" ? "接近预警" : "重新进入"}`,
+      `方向: ${plainDirection(record)}`,
+      `价格: ${fmtPrice(record.triggerPrice ?? record.current?.price)} | 区域: ${fmtPrice(record.zoneLow)} - ${fmtPrice(record.zoneHigh)}`,
+      `日线锚点: ${fmtTime(record.originTime)} | 4小时触发: ${fmtTime(record.triggerTime || record.touchTime)}`,
+    ].join("\n"));
+  }
+  for (const episode of episodes.sort((a, b) => Number(a.updatedAt || a.time || 0) - Number(b.updatedAt || b.time || 0))) {
+    const evidence = episode.evidence || {};
+    const context = episode.context || {};
+    const snapshots = episode.followUp?.snapshots || {};
+    const outcomes = ["5m", "15m", "1h", "4h"]
+      .filter((label) => Number.isFinite(Number(snapshots[label]?.directionalPct)))
+      .map((label) => `${label} ${fmtPct(snapshots[label].directionalPct)}`)
+      .join(" | ") || "等待后续表现";
+    add(episode, [
+      `[实时] ${fmtTime(episode.updatedAt || episode.time)} · ${(episode.stages || [episode.type]).slice().reverse().map(realtimeType).join(" -> ")}`,
+      `方向: ${plainDirection(episode)} | 证据: ${evidence.level || "待观察"} (${evidence.score ?? 0})`,
+      `价格: ${fmtPrice(episode.price)} | 区域: ${fmtPrice(episode.zoneLow)} - ${fmtPrice(episode.zoneHigh)}`,
+      `依据: ${(evidence.reasons || []).join("、") || "暂无充分猎杀证据"}`,
+      `OI: ${fmtPct(context.oiChangePct)} | 强平: ${fmtUsd(context.liquidationUsd)} | 15分钟成交: ${fmtUsd(context.tradeVolumeUsd)}`,
+      `后续: ${outcomes}`,
+    ].join("\n"));
+  }
+  const rows = [...grouped.entries()].map(([symbol, items], index) => `${index + 1}. ${symbol}\n${items.join("\n\n")}`);
+  const dateKey = shanghaiDateKey(now);
+  const symbols = buildTradingViewWatchlist([...records, ...episodes]);
+  return {
+    dateKey,
+    symbols,
+    text: [
+      "Matrix 关键区域每日标的总结",
+      `生成时间: ${fmtTime(now)}（北京时间）`,
+      "范围: 过去 24 小时",
+      `关键区域记录: ${records.length} | 实时机会: ${episodes.length} | 去重标的: ${symbols.length}`,
+      "说明: 顺向表现仅用于指标复核，不代表真实成交或交易收益。",
+      "",
+      rows.join("\n\n--------------------\n\n") || "过去 24 小时没有已记录的关键区域信号或实时事件。",
+      "",
+      "TradingView 自选列表（可单独复制导入）:",
+      symbols.join(",") || "-",
+    ].join("\n"),
+  };
+}
+
 function buildOnchainMessage(events) {
   const rows = events.slice(0, 10).map((event, index) => [
     `${index + 1}. <b>${htmlEscape(event.symbol || event.address)}</b> · ${event.mode === "below" ? "跌破" : event.mode === "above" ? "突破" : "进入区间"}`,
@@ -327,19 +418,55 @@ async function sendTelegram(text) {
   }
 }
 
-async function sendTradingViewWatchlist(records) {
-  const symbols = buildTradingViewWatchlist(records);
-  if (!symbols.length) return;
+async function sendTelegramDocument(content, filename, caption) {
   const form = new FormData();
   form.append("chat_id", chatId);
-  form.append("caption", `TradingView 自选列表｜本批 ${symbols.length} 个标的`);
-  form.append("document", new Blob([symbols.join(",")], { type: "text/plain;charset=utf-8" }), watchlistFilename());
+  form.append("caption", caption);
+  form.append("document", new Blob([content], { type: "text/plain;charset=utf-8" }), filename);
   const response = await fetchWithTimeout(`https://api.telegram.org/bot${token}/sendDocument`, {
     method: "POST",
     body: form,
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.description || `Telegram document ${response.status}`);
+}
+
+async function sendTradingViewWatchlist(records) {
+  const symbols = buildTradingViewWatchlist(records);
+  if (!symbols.length) return;
+  await sendTelegramDocument(symbols.join(","), watchlistFilename(), `TradingView 自选列表｜本批 ${symbols.length} 个标的`);
+}
+
+async function readDailySummaryState() {
+  try { return JSON.parse(await readFile(dailySummaryStateFile, "utf8")); }
+  catch { return {}; }
+}
+
+async function markDailySummarySent(dateKey) {
+  await mkdir(join(process.cwd(), "data"), { recursive: true });
+  await writeFile(dailySummaryStateFile, JSON.stringify({ lastDate: dateKey, sentAt: new Date().toISOString() }, null, 2), "utf8");
+}
+
+async function maybeSendDailySummary(historyData, realtimeData) {
+  const dateKey = shanghaiDateKey();
+  const state = await readDailySummaryState();
+  if (!forceDailySummary && (shanghaiHour() < dailySummaryHour || state.lastDate === dateKey)) return false;
+  const report = buildDailyKeyZoneSummary(historyData, realtimeData);
+  await sendTelegramDocument(
+    `\ufeff${report.text}`,
+    dailySummaryFilename(report.dateKey),
+    `每日标的总结｜过去24小时 ${report.symbols.length} 个标的`,
+  );
+  if (report.symbols.length) {
+    await sendTelegramDocument(
+      report.symbols.join(","),
+      dailyWatchlistFilename(report.dateKey),
+      `TradingView 每日聚合列表｜${report.symbols.length} 个标的`,
+    );
+  }
+  await markDailySummarySent(dateKey);
+  console.log(`[${new Date().toISOString()}] sent daily keyzone summary symbols=${report.symbols.length}`);
+  return true;
 }
 
 async function acknowledgeManualPush(id) {
@@ -368,6 +495,18 @@ async function sendManualPushRequests(data) {
 }
 
 async function run() {
+  if (forceDailySummary) {
+    const [historyResponse, realtimeResponse] = await Promise.all([
+      fetchWithTimeout(reversalHistoryUrl),
+      fetchWithTimeout(reversalRealtimeUrl),
+    ]);
+    const historyData = await historyResponse.json().catch(() => ({}));
+    const realtimeData = await realtimeResponse.json().catch(() => ({}));
+    if (!historyResponse.ok) throw new Error(historyData.error || `Daily history HTTP ${historyResponse.status}`);
+    if (!realtimeResponse.ok) throw new Error(realtimeData.error || `Daily realtime HTTP ${realtimeResponse.status}`);
+    await maybeSendDailySummary(historyData, realtimeData);
+    return;
+  }
   const includeSummary = once || Date.now() - lastSummaryAt >= summaryIntervalMs;
   const results = await Promise.allSettled([
     includeSummary ? fetchWithTimeout(scanUrl) : Promise.resolve(null),
@@ -439,7 +578,11 @@ async function run() {
     await markRealtimeEventsSent(realtimeBaseline, realtimeState);
   }
   if (manualPushResult.status === "fulfilled" && manualPushResult.value.ok) await sendManualPushRequests(manualPushData);
-  if (!sections.length && !(Array.isArray(manualPushData.requests) && manualPushData.requests.length)) {
+  let sentDailySummary = false;
+  if (reversalResult.status === "fulfilled" && reversalResult.value.ok && realtimeResult.status === "fulfilled" && realtimeResult.value.ok) {
+    sentDailySummary = await maybeSendDailySummary(reversalData, realtimeData);
+  }
+  if (!sections.length && !sentDailySummary && !(Array.isArray(manualPushData.requests) && manualPushData.requests.length)) {
     console.log(`[${new Date().toISOString()}] checked: no new records`);
     return;
   }
