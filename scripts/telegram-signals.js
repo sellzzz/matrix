@@ -1,7 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setDefaultResultOrder } from "node:dns";
-import { ProxyAgent } from "undici";
+import { Agent, ProxyAgent } from "undici";
 import { shouldNotifyRealtimeEvent } from "../src/telegram-quiet-mode.js";
 
 setDefaultResultOrder("ipv4first");
@@ -22,7 +22,12 @@ const chatId = process.env.TELEGRAM_CHAT_ID;
 const telegramApiBaseUrl = String(process.env.TELEGRAM_API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
 const telegramProxyUrl = String(process.env.TELEGRAM_PROXY_URL || "").trim();
 const telegramRelaySecret = String(process.env.TELEGRAM_RELAY_SECRET || "").trim();
-const telegramDispatcher = telegramProxyUrl ? new ProxyAgent(telegramProxyUrl) : null;
+const telegramForceIpv4 = process.env.TELEGRAM_FORCE_IPV4 !== "0";
+const telegramDispatcher = telegramProxyUrl
+  ? new ProxyAgent(telegramProxyUrl)
+  : telegramForceIpv4
+    ? new Agent({ connect: { family: 4 } })
+    : null;
 const scanUrl = process.env.SIGNAL_SCAN_URL || DEFAULT_SCAN_URL;
 const smallCapScanUrl = process.env.SMALLCAP_SCAN_URL || DEFAULT_SMALLCAP_SCAN_URL;
 const reversalHistoryUrl = process.env.REVERSAL_HISTORY_URL || DEFAULT_REVERSAL_HISTORY_URL;
