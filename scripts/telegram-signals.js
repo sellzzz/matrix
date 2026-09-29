@@ -1,6 +1,9 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { setDefaultResultOrder } from "node:dns";
 import { shouldNotifyRealtimeEvent } from "../src/telegram-quiet-mode.js";
+
+setDefaultResultOrder("ipv4first");
 
 const DEFAULT_SCAN_URL =
   "http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=30&maxSymbols=500";
@@ -32,6 +35,7 @@ const quietMode = process.env.TELEGRAM_QUIET_MODE !== "0";
 const forceDailySummary = process.argv.includes("--daily-summary");
 const once = process.argv.includes("--once") || forceDailySummary;
 const REQUEST_TIMEOUT_MS = 15_000;
+const telegramRequestRetries = Math.min(5, Math.max(1, Number.parseInt(process.env.TELEGRAM_REQUEST_RETRIES || "3", 10) || 3));
 let lastSummaryAt = 0;
 
 if (!token || !chatId) {
@@ -126,9 +130,28 @@ async function fetchWithTimeout(url, options = {}) {
   const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
     return await fetch(url, { ...options, signal: controller.signal });
+  } catch (error) {
+    const target = new URL(url);
+    const safePath = target.hostname === "api.telegram.org" ? target.pathname.replace(/\/bot[^/]+/, "/bot***/") : target.pathname;
+    const code = error?.cause?.code || error?.code;
+    const detail = error?.name === "AbortError" ? `timeout after ${REQUEST_TIMEOUT_MS}ms` : code || error?.cause?.message || error?.message || "unknown error";
+    throw new Error(`${target.host}${safePath}: ${detail}`);
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function fetchTelegram(url, options) {
+  let lastError;
+  for (let attempt = 1; attempt <= telegramRequestRetries; attempt += 1) {
+    try {
+      return await fetchWithTimeout(url, options);
+    } catch (error) {
+      lastError = error;
+      if (attempt < telegramRequestRetries) await new Promise((resolve) => setTimeout(resolve, attempt * 1_500));
+    }
+  }
+  throw lastError;
 }
 
 function buildMessage(data) {
@@ -404,7 +427,7 @@ async function markRealtimeEventsSent(items, state) {
 }
 
 async function sendTelegram(text) {
-  const response = await fetchWithTimeout(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const response = await fetchTelegram(`https://api.telegram.org/bot${token}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -425,7 +448,7 @@ async function sendTelegramDocument(content, filename, caption) {
   form.append("chat_id", chatId);
   form.append("caption", caption);
   form.append("document", new Blob([content], { type: "text/plain;charset=utf-8" }), filename);
-  const response = await fetchWithTimeout(`https://api.telegram.org/bot${token}/sendDocument`, {
+  const response = await fetchTelegram(`https://api.telegram.org/bot${token}/sendDocument`, {
     method: "POST",
     body: form,
   });
