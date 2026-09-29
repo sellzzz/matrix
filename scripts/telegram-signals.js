@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setDefaultResultOrder } from "node:dns";
+import { ProxyAgent } from "undici";
 import { shouldNotifyRealtimeEvent } from "../src/telegram-quiet-mode.js";
 
 setDefaultResultOrder("ipv4first");
@@ -18,6 +19,10 @@ const DEFAULT_POLL_INTERVAL_MS = 60 * 1000;
 
 const token = process.env.TELEGRAM_BOT_TOKEN;
 const chatId = process.env.TELEGRAM_CHAT_ID;
+const telegramApiBaseUrl = String(process.env.TELEGRAM_API_BASE_URL || "https://api.telegram.org").replace(/\/+$/, "");
+const telegramProxyUrl = String(process.env.TELEGRAM_PROXY_URL || "").trim();
+const telegramRelaySecret = String(process.env.TELEGRAM_RELAY_SECRET || "").trim();
+const telegramDispatcher = telegramProxyUrl ? new ProxyAgent(telegramProxyUrl) : null;
 const scanUrl = process.env.SIGNAL_SCAN_URL || DEFAULT_SCAN_URL;
 const smallCapScanUrl = process.env.SMALLCAP_SCAN_URL || DEFAULT_SMALLCAP_SCAN_URL;
 const reversalHistoryUrl = process.env.REVERSAL_HISTORY_URL || DEFAULT_REVERSAL_HISTORY_URL;
@@ -132,7 +137,7 @@ async function fetchWithTimeout(url, options = {}) {
     return await fetch(url, { ...options, signal: controller.signal });
   } catch (error) {
     const target = new URL(url);
-    const safePath = target.hostname === "api.telegram.org" ? target.pathname.replace(/\/bot[^/]+/, "/bot***/") : target.pathname;
+    const safePath = target.pathname.replace(/\/bot[^/]+/, "/bot***/");
     const code = error?.cause?.code || error?.code;
     const detail = error?.name === "AbortError" ? `timeout after ${REQUEST_TIMEOUT_MS}ms` : code || error?.cause?.message || error?.message || "unknown error";
     throw new Error(`${target.host}${safePath}: ${detail}`);
@@ -145,13 +150,21 @@ async function fetchTelegram(url, options) {
   let lastError;
   for (let attempt = 1; attempt <= telegramRequestRetries; attempt += 1) {
     try {
-      return await fetchWithTimeout(url, options);
+      return await fetchWithTimeout(url, { ...options, ...(telegramDispatcher ? { dispatcher: telegramDispatcher } : {}) });
     } catch (error) {
       lastError = error;
       if (attempt < telegramRequestRetries) await new Promise((resolve) => setTimeout(resolve, attempt * 1_500));
     }
   }
   throw lastError;
+}
+
+function telegramApiUrl(method) {
+  return `${telegramApiBaseUrl}/bot${token}/${method}`;
+}
+
+function telegramRequestHeaders(headers = {}) {
+  return telegramRelaySecret ? { ...headers, "x-telegram-relay-secret": telegramRelaySecret } : headers;
 }
 
 function buildMessage(data) {
@@ -427,9 +440,9 @@ async function markRealtimeEventsSent(items, state) {
 }
 
 async function sendTelegram(text) {
-  const response = await fetchTelegram(`https://api.telegram.org/bot${token}/sendMessage`, {
+  const response = await fetchTelegram(telegramApiUrl("sendMessage"), {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: telegramRequestHeaders({ "content-type": "application/json" }),
     body: JSON.stringify({
       chat_id: chatId,
       text,
@@ -448,8 +461,9 @@ async function sendTelegramDocument(content, filename, caption) {
   form.append("chat_id", chatId);
   form.append("caption", caption);
   form.append("document", new Blob([content], { type: "text/plain;charset=utf-8" }), filename);
-  const response = await fetchTelegram(`https://api.telegram.org/bot${token}/sendDocument`, {
+  const response = await fetchTelegram(telegramApiUrl("sendDocument"), {
     method: "POST",
+    headers: telegramRequestHeaders(),
     body: form,
   });
   const payload = await response.json().catch(() => ({}));

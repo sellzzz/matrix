@@ -175,6 +175,8 @@ SIGNAL_INTERVAL_MS=3600000
 TELEGRAM_POLL_INTERVAL_MS=60000
 ```
 
+If the server cannot connect to `api.telegram.org`, configure either `TELEGRAM_PROXY_URL` for a trusted HTTP(S) proxy or `TELEGRAM_API_BASE_URL` for a relay you control. An optional `TELEGRAM_RELAY_SECRET` is sent in the `x-telegram-relay-secret` header. Never send a bot token through an unknown public relay.
+
 Quiet mode keeps the existing scan frequency, complete server records, and hourly position/low-cap summary. Realtime Telegram messages are limited to the first zone touch and later reclaim confirmation; approaching, swept, and front-run stages remain available on the dashboard and in the daily report. Automatic TradingView attachments are consolidated into the daily report, while manual pushes still include them. Set `TELEGRAM_QUIET_MODE=0` to restore every-stage notifications and automatic attachments.
 
 The notifier sends one aggregated key-zone review for the previous 24 hours at the configured Beijing-time hour. To send that daily report immediately:
