@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createZoneRuntime, directionalReturnPct, groupZoneEvents, processZonePrice, summarizeEvidence, summarizeFollowUpEpisodes } from "../src/realtime-zone-engine.js";
-import { shouldNotifyRealtimeEvent, signalSetFingerprint } from "../src/telegram-quiet-mode.js";
+import { shouldNotifyRealtimeEvent } from "../src/telegram-quiet-mode.js";
 
 const resistance = { symbol: "TESTUSDT", side: "resistance", zoneLow: 100, zoneHigh: 102, originTime: 1 };
 const runtime = createZoneRuntime(resistance);
@@ -39,7 +39,6 @@ const legacyFollowUp = summarizeFollowUpEpisodes([{ stages: ["reclaimed"] }]);
 assert.equal(legacyFollowUp.tracking, 0);
 assert.equal(legacyFollowUp.legacyUntracked, 1);
 
-assert.equal(signalSetFingerprint([{ symbol: "BTCUSDT", changePct: 3 }, { symbol: "BTCUSDT", changePct: 5 }, { symbol: "ETHUSDT", changePct: -2 }]), "BTCUSDT:up|ETHUSDT:down");
 assert.equal(shouldNotifyRealtimeEvent({ type: "approaching" }), false);
 assert.equal(shouldNotifyRealtimeEvent({ type: "touched" }), true);
 assert.equal(shouldNotifyRealtimeEvent({ type: "swept" }), false);

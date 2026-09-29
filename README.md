@@ -174,7 +174,7 @@ SIGNAL_INTERVAL_MS=3600000
 TELEGRAM_POLL_INTERVAL_MS=60000
 ```
 
-Quiet mode keeps the existing scan frequency and complete server records, but only pushes a changed position/low-cap symbol set plus the first zone touch and later reclaim confirmation. Approaching, swept, front-run, and repeated hourly snapshots remain available on the dashboard and in the daily report. Set `TELEGRAM_QUIET_MODE=0` to restore every-stage Telegram notifications.
+Quiet mode keeps the existing scan frequency, complete server records, and hourly position/low-cap summary. Realtime Telegram messages are limited to the first zone touch and later reclaim confirmation; approaching, swept, and front-run stages remain available on the dashboard and in the daily report. Automatic TradingView attachments are consolidated into the daily report, while manual pushes still include them. Set `TELEGRAM_QUIET_MODE=0` to restore every-stage notifications and automatic attachments.
 
 The notifier sends one aggregated key-zone review for the previous 24 hours at the configured Beijing-time hour. To send that daily report immediately:
 

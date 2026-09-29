@@ -81,4 +81,4 @@ set +a
 npm run notify:telegram -- --daily-summary
 ```
 
-推荐同时设置 `TELEGRAM_QUIET_MODE=1`。安静模式不降低扫描频率，也不丢弃服务器记录，只减少重复小时摘要和低优先级实时阶段的 Telegram 消息。
+推荐同时设置 `TELEGRAM_QUIET_MODE=1`。安静模式不降低扫描频率、不丢弃服务器记录，也不会取消每小时汇报，只合并自动附件并减少低优先级实时阶段的 Telegram 消息。
