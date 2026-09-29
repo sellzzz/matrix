@@ -169,9 +169,12 @@ SMALLCAP_SCAN_URL='http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=0
 REVERSAL_HISTORY_URL='http://127.0.0.1:8787/api/reversal/history?limit=500'
 REVERSAL_REALTIME_URL='http://127.0.0.1:8787/api/reversal/realtime?limit=500'
 DAILY_KEY_ZONE_REPORT_HOUR=9
+TELEGRAM_QUIET_MODE=1
 SIGNAL_INTERVAL_MS=3600000
 TELEGRAM_POLL_INTERVAL_MS=60000
 ```
+
+Quiet mode keeps the existing scan frequency and complete server records, but only pushes a changed position/low-cap symbol set plus the first zone touch and later reclaim confirmation. Approaching, swept, front-run, and repeated hourly snapshots remain available on the dashboard and in the daily report. Set `TELEGRAM_QUIET_MODE=0` to restore every-stage Telegram notifications.
 
 The notifier sends one aggregated key-zone review for the previous 24 hours at the configured Beijing-time hour. To send that daily report immediately:
 

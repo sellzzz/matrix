@@ -1,5 +1,6 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { shouldNotifyRealtimeEvent, signalSetFingerprint } from "../src/telegram-quiet-mode.js";
 
 const DEFAULT_SCAN_URL =
   "http://127.0.0.1:8787/api/scan?period=4h&points=5&threshold=30&maxSymbols=500";
@@ -24,9 +25,11 @@ const reversalStateFile = process.env.REVERSAL_NOTIFY_STATE_FILE || join(process
 const realtimeStateFile = process.env.REVERSAL_REALTIME_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-realtime-state.json");
 const onchainStateFile = process.env.ONCHAIN_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-onchain-state.json");
 const dailySummaryStateFile = process.env.DAILY_KEY_ZONE_STATE_FILE || join(process.cwd(), "data", "telegram-daily-key-zone-state.json");
+const summaryStateFile = process.env.TELEGRAM_SUMMARY_STATE_FILE || join(process.cwd(), "data", "telegram-summary-state.json");
 const summaryIntervalMs = Math.max(60_000, Number(process.env.SIGNAL_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
 const pollIntervalMs = Math.max(15_000, Number(process.env.TELEGRAM_POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS);
 const dailySummaryHour = Math.min(23, Math.max(0, Number.parseInt(process.env.DAILY_KEY_ZONE_REPORT_HOUR || "9", 10) || 0));
+const quietMode = process.env.TELEGRAM_QUIET_MODE !== "0";
 const forceDailySummary = process.argv.includes("--daily-summary");
 const once = process.argv.includes("--once") || forceDailySummary;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -447,6 +450,16 @@ async function markDailySummarySent(dateKey) {
   await writeFile(dailySummaryStateFile, JSON.stringify({ lastDate: dateKey, sentAt: new Date().toISOString() }, null, 2), "utf8");
 }
 
+async function readSummaryState() {
+  try { return JSON.parse(await readFile(summaryStateFile, "utf8")); }
+  catch { return {}; }
+}
+
+async function saveSummaryState(state) {
+  await mkdir(join(process.cwd(), "data"), { recursive: true });
+  await writeFile(summaryStateFile, JSON.stringify({ ...state, updatedAt: new Date().toISOString() }, null, 2), "utf8");
+}
+
 async function maybeSendDailySummary(historyData, realtimeData) {
   const dateKey = shanghaiDateKey();
   const state = await readDailySummaryState();
@@ -526,9 +539,22 @@ async function run() {
   const signalOk = includeSummary && signalResult.status === "fulfilled" && signalResult.value?.ok;
   const smallCapOk = includeSummary && smallCapResult.status === "fulfilled" && smallCapResult.value?.ok;
   const sections = [];
+  let nextSummaryState = null;
   if (includeSummary) {
-    sections.push(signalOk ? buildMessage(signalData) : `<b>Position Change Signals</b>\n读取失败: ${htmlEscape(signalData.error || `HTTP ${signalResult.value?.status || "network"}`)}`);
-    sections.push(smallCapOk ? buildSmallCapMessage(smallCapData) : `<b>Low-Cap Position Signals</b>\n读取失败: ${htmlEscape(smallCapData.error || `HTTP ${smallCapResult.value?.status || "network"}`)}`);
+    const previousSummaryState = await readSummaryState();
+    const positionRows = signalOk && Array.isArray(signalData.alerts) ? signalData.alerts : [];
+    const smallCapRows = smallCapOk && Array.isArray(smallCapData.smallCaps) ? smallCapData.smallCaps : [];
+    const positionFingerprint = signalOk ? signalSetFingerprint(positionRows) : `error:${signalResult.value?.status || "network"}`;
+    const smallCapFingerprint = smallCapOk ? signalSetFingerprint(smallCapRows) : `error:${smallCapResult.value?.status || "network"}`;
+    const positionChanged = !quietMode || previousSummaryState.position !== positionFingerprint;
+    const smallCapChanged = !quietMode || previousSummaryState.smallCap !== smallCapFingerprint;
+    if (positionChanged && (positionRows.length || !signalOk)) {
+      sections.push(signalOk ? buildMessage(signalData) : `<b>Position Change Signals</b>\n读取失败: ${htmlEscape(signalData.error || `HTTP ${signalResult.value?.status || "network"}`)}`);
+    }
+    if (smallCapChanged && (smallCapRows.length || !smallCapOk)) {
+      sections.push(smallCapOk ? buildSmallCapMessage(smallCapData) : `<b>Low-Cap Position Signals</b>\n读取失败: ${htmlEscape(smallCapData.error || `HTTP ${smallCapResult.value?.status || "network"}`)}`);
+    }
+    nextSummaryState = { position: positionFingerprint, smallCap: smallCapFingerprint };
   }
   let reversalState = null;
   let newReversalRecords = [];
@@ -540,15 +566,17 @@ async function run() {
   }
   let realtimeState = null;
   let newRealtimeEvents = [];
+  let realtimeNotifications = [];
   let realtimeBaseline = [];
   let initializeRealtimeState = false;
   if (realtimeResult.status === "fulfilled" && realtimeResult.value.ok) {
     const fresh = await findNewRealtimeEvents(realtimeData);
     realtimeState = fresh.state;
     newRealtimeEvents = fresh.fresh;
+    realtimeNotifications = newRealtimeEvents.filter((event) => shouldNotifyRealtimeEvent(event, quietMode));
     realtimeBaseline = fresh.baseline;
     initializeRealtimeState = fresh.initialize;
-    if (newRealtimeEvents.length) sections.push(buildRealtimeMessage(newRealtimeEvents));
+    if (realtimeNotifications.length) sections.push(buildRealtimeMessage(realtimeNotifications));
   }
   let onchainState = null;
   let newOnchainEvents = [];
@@ -560,7 +588,7 @@ async function run() {
   }
   if (sections.length) {
     await sendTelegram(sections.join("\n\n"));
-    if (newReversalRecords.length) {
+    if (newReversalRecords.length && !quietMode) {
       try {
         await sendTradingViewWatchlist(newReversalRecords);
       } catch (error) {
@@ -572,10 +600,11 @@ async function run() {
       await markRealtimeEventsSent([...newRealtimeEvents, ...realtimeBaseline], realtimeState);
     }
     if (onchainState && newOnchainEvents.length) await markOnchainEventsSent(newOnchainEvents, onchainState);
-    if (includeSummary) lastSummaryAt = Date.now();
   }
-  if (!sections.length && realtimeState && (initializeRealtimeState || realtimeBaseline.length)) {
-    await markRealtimeEventsSent(realtimeBaseline, realtimeState);
+  if (nextSummaryState) await saveSummaryState(nextSummaryState);
+  if (includeSummary) lastSummaryAt = Date.now();
+  if (!sections.length && realtimeState && (initializeRealtimeState || newRealtimeEvents.length || realtimeBaseline.length)) {
+    await markRealtimeEventsSent([...newRealtimeEvents, ...realtimeBaseline], realtimeState);
   }
   if (manualPushResult.status === "fulfilled" && manualPushResult.value.ok) await sendManualPushRequests(manualPushData);
   let sentDailySummary = false;
