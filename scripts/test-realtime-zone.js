@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createZoneRuntime, directionalReturnPct, groupZoneEvents, processZonePrice, summarizeEvidence, summarizeFollowUpEpisodes } from "../src/realtime-zone-engine.js";
 import { shouldNotifyRealtimeEvent } from "../src/telegram-quiet-mode.js";
-import { mergeRealtimeLifecycle, periodicSummaryFingerprint, realtimeZoneKey, shouldEscalateRealtimeEvent } from "../src/telegram-push-policy.js";
+import { canSendAutomatedPush, mergeRealtimeLifecycle, periodicSummaryFingerprint, realtimeZoneKey } from "../src/telegram-push-policy.js";
 
 const resistance = { symbol: "TESTUSDT", side: "resistance", zoneLow: 100, zoneHigh: 102, originTime: 1 };
 const runtime = createZoneRuntime(resistance);
@@ -67,8 +67,9 @@ const lifecycle = mergeRealtimeLifecycle(
 assert.deepEqual(lifecycle.stages, ["touched", "reclaimed"]);
 assert.equal(lifecycle.type, "reclaimed");
 assert.equal(realtimeZoneKey(lifecycle), "zone-3");
-assert.equal(shouldEscalateRealtimeEvent(lifecycle), true);
-assert.equal(shouldEscalateRealtimeEvent({ type: "accepted", evidence: { level: "invalidated" } }), false);
+assert.equal(canSendAutomatedPush("2026-10-01T00:00:00.000Z", 600_000, Date.parse("2026-10-01T00:09:59.999Z")), false);
+assert.equal(canSendAutomatedPush("2026-10-01T00:00:00.000Z", 600_000, Date.parse("2026-10-01T00:10:00.000Z")), true);
+assert.equal(canSendAutomatedPush(null, 600_000, Date.parse("2026-10-01T00:00:00.000Z")), true);
 assert.equal(
   periodicSummaryFingerprint({ alerts: [{ symbol: "BTCUSDT", changePct: 10 }] }, { smallCaps: [] }),
   periodicSummaryFingerprint({ alerts: [{ symbol: "BTCUSDT", changePct: 20 }] }, { smallCaps: [] }),

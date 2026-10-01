@@ -12,8 +12,9 @@ export function mergeRealtimeLifecycle(current, event) {
   return { ...(current || {}), ...(event || {}), stages };
 }
 
-export function shouldEscalateRealtimeEvent(event = {}) {
-  return event.type === "reclaimed" && ["medium", "high"].includes(event.evidence?.level);
+export function canSendAutomatedPush(lastSentAt, minimumIntervalMs, now = Date.now()) {
+  const previous = new Date(lastSentAt || 0).getTime();
+  return !Number.isFinite(previous) || now - previous >= minimumIntervalMs;
 }
 
 export function periodicSummaryFingerprint(signalData = {}, smallCapData = {}) {

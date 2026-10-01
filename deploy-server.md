@@ -81,4 +81,4 @@ set +a
 npm run notify:telegram -- --daily-summary
 ```
 
-推荐同时设置 `TELEGRAM_QUIET_MODE=1` 和 `TELEGRAM_COMPACT_REALTIME=1`。安静模式不降低扫描频率、不丢弃服务器记录；首次触及仍及时提醒，同一区域后续阶段更新原消息，中高证据收回仍单独推送。仓位榜每小时检查，名单未变化时按 `TELEGRAM_SUMMARY_HEARTBEAT_MS` 保底汇报。
+推荐设置 `TELEGRAM_QUIET_MODE=1` 和 `TELEGRAM_MIN_PUSH_INTERVAL_MS=600000`。扫描和记录频率不变，自动 Telegram 消息在任意连续 10 分钟内最多一条，同一区域的多个阶段会合并进下一条摘要。仓位榜每小时检查，名单未变化时按 `TELEGRAM_SUMMARY_HEARTBEAT_MS` 保底汇报；手动推送仍即时执行。

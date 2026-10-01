@@ -170,7 +170,7 @@ REVERSAL_HISTORY_URL='http://127.0.0.1:8787/api/reversal/history?limit=500'
 REVERSAL_REALTIME_URL='http://127.0.0.1:8787/api/reversal/realtime?limit=500'
 DAILY_KEY_ZONE_REPORT_HOUR=9
 TELEGRAM_QUIET_MODE=1
-TELEGRAM_COMPACT_REALTIME=1
+TELEGRAM_MIN_PUSH_INTERVAL_MS=600000
 TELEGRAM_REQUEST_RETRIES=3
 TELEGRAM_FORCE_IPV4=1
 SIGNAL_INTERVAL_MS=3600000
@@ -180,7 +180,7 @@ TELEGRAM_POLL_INTERVAL_MS=60000
 
 If the server cannot connect to `api.telegram.org`, configure either `TELEGRAM_PROXY_URL` for a trusted HTTP(S) proxy or `TELEGRAM_API_BASE_URL` for a relay you control. An optional `TELEGRAM_RELAY_SECRET` is sent in the `x-telegram-relay-secret` header. Never send a bot token through an unknown public relay.
 
-Quiet mode keeps the existing scan frequency and complete server records. With compact realtime mode enabled, the first zone touch still sends promptly, later low-priority lifecycle changes update that Telegram message, and medium/high reclaim confirmations remain new alerts. Position/low-cap data is checked hourly but an unchanged symbol set is repeated only at the heartbeat interval. All stages remain available on the dashboard and in the daily report. Set `TELEGRAM_QUIET_MODE=0` to restore every-stage notifications and automatic attachments.
+Quiet mode keeps the existing scan frequency and complete server records. Automatic Telegram notifications are accumulated into one digest with a hard minimum interval controlled by `TELEGRAM_MIN_PUSH_INTERVAL_MS` (10 minutes by default). Multiple stages for the same zone are merged in that digest. Position/low-cap data is checked hourly but an unchanged symbol set is repeated only at the heartbeat interval. All stages remain available on the dashboard and in the daily report. Manual pushes remain immediate. Set `TELEGRAM_QUIET_MODE=0` to include every realtime stage in the next digest.
 
 The notifier sends one aggregated key-zone review for the previous 24 hours at the configured Beijing-time hour. To send that daily report immediately:
 
