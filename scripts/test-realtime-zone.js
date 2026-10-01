@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createZoneRuntime, directionalReturnPct, groupZoneEvents, processZonePrice, summarizeEvidence, summarizeFollowUpEpisodes } from "../src/realtime-zone-engine.js";
 import { shouldNotifyRealtimeEvent } from "../src/telegram-quiet-mode.js";
+import { mergeRealtimeLifecycle, periodicSummaryFingerprint, realtimeZoneKey, shouldEscalateRealtimeEvent } from "../src/telegram-push-policy.js";
 
 const resistance = { symbol: "TESTUSDT", side: "resistance", zoneLow: 100, zoneHigh: 102, originTime: 1 };
 const runtime = createZoneRuntime(resistance);
@@ -58,5 +59,23 @@ assert.equal(shouldNotifyRealtimeEvent({ type: "reclaimed" }), true);
 assert.equal(shouldNotifyRealtimeEvent({ type: "accepted" }), true);
 assert.equal(shouldNotifyRealtimeEvent({ type: "front-run" }), false);
 assert.equal(shouldNotifyRealtimeEvent({ type: "approaching" }, false), true);
+
+const lifecycle = mergeRealtimeLifecycle(
+  { zoneKey: "zone-3", type: "touched", stages: ["touched"], time: 1_000 },
+  { zoneKey: "zone-3", type: "reclaimed", evidence: { level: "high" }, time: 2_000 },
+);
+assert.deepEqual(lifecycle.stages, ["touched", "reclaimed"]);
+assert.equal(lifecycle.type, "reclaimed");
+assert.equal(realtimeZoneKey(lifecycle), "zone-3");
+assert.equal(shouldEscalateRealtimeEvent(lifecycle), true);
+assert.equal(shouldEscalateRealtimeEvent({ type: "accepted", evidence: { level: "invalidated" } }), false);
+assert.equal(
+  periodicSummaryFingerprint({ alerts: [{ symbol: "BTCUSDT", changePct: 10 }] }, { smallCaps: [] }),
+  periodicSummaryFingerprint({ alerts: [{ symbol: "BTCUSDT", changePct: 20 }] }, { smallCaps: [] }),
+);
+assert.notEqual(
+  periodicSummaryFingerprint({ alerts: [{ symbol: "BTCUSDT", changePct: 10 }] }, { smallCaps: [] }),
+  periodicSummaryFingerprint({ alerts: [{ symbol: "ETHUSDT", changePct: 10 }] }, { smallCaps: [] }),
+);
 
 console.log("realtime zone engine tests passed");

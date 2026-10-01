@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { setDefaultResultOrder } from "node:dns";
 import { Agent, ProxyAgent } from "undici";
 import { shouldNotifyRealtimeEvent } from "../src/telegram-quiet-mode.js";
+import { mergeRealtimeLifecycle, periodicSummaryFingerprint, realtimeZoneKey, shouldEscalateRealtimeEvent } from "../src/telegram-push-policy.js";
 
 setDefaultResultOrder("ipv4first");
 
@@ -38,10 +39,13 @@ const reversalStateFile = process.env.REVERSAL_NOTIFY_STATE_FILE || join(process
 const realtimeStateFile = process.env.REVERSAL_REALTIME_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-realtime-state.json");
 const onchainStateFile = process.env.ONCHAIN_NOTIFY_STATE_FILE || join(process.cwd(), "data", "telegram-onchain-state.json");
 const dailySummaryStateFile = process.env.DAILY_KEY_ZONE_STATE_FILE || join(process.cwd(), "data", "telegram-daily-key-zone-state.json");
+const periodicSummaryStateFile = process.env.TELEGRAM_SUMMARY_STATE_FILE || join(process.cwd(), "data", "telegram-summary-state.json");
 const summaryIntervalMs = Math.max(60_000, Number(process.env.SIGNAL_INTERVAL_MS) || DEFAULT_INTERVAL_MS);
 const pollIntervalMs = Math.max(15_000, Number(process.env.TELEGRAM_POLL_INTERVAL_MS) || DEFAULT_POLL_INTERVAL_MS);
+const summaryHeartbeatMs = Math.max(60 * 60_000, Number(process.env.TELEGRAM_SUMMARY_HEARTBEAT_MS) || 6 * 60 * 60_000);
 const dailySummaryHour = Math.min(23, Math.max(0, Number.parseInt(process.env.DAILY_KEY_ZONE_REPORT_HOUR || "9", 10) || 0));
 const quietMode = process.env.TELEGRAM_QUIET_MODE !== "0";
+const compactRealtimeMode = quietMode && process.env.TELEGRAM_COMPACT_REALTIME !== "0";
 const forceDailySummary = process.argv.includes("--daily-summary");
 const once = process.argv.includes("--once") || forceDailySummary;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -254,13 +258,14 @@ function realtimeType(type) {
   })[type] || type;
 }
 
-function buildRealtimeMessage(events) {
+function buildRealtimeMessage(events, title = "Key Zone Realtime") {
   const opportunityMap = new Map();
-  for (const event of events) {
-    const key = event.zoneKey || [event.symbol, event.side, event.originTime, event.zoneLow, event.zoneHigh].join(":");
-    if (!opportunityMap.has(key)) opportunityMap.set(key, event);
+  for (const event of [...events].sort((a, b) => Number(a.time || 0) - Number(b.time || 0))) {
+    const key = realtimeZoneKey(event);
+    opportunityMap.set(key, mergeRealtimeLifecycle(opportunityMap.get(key), event));
   }
-  const opportunities = [...opportunityMap.values()];
+  const opportunities = [...opportunityMap.values()].sort((a, b) => Number(b.time || 0) - Number(a.time || 0));
+  const stageCount = opportunities.reduce((sum, event) => sum + Math.max(1, event.stages?.length || 0), 0);
   const rows = opportunities.slice(0, 10).map((event, index) => {
     const support = event.side === "support";
     const chart = tradingViewChart(event);
@@ -271,16 +276,18 @@ function buildRealtimeMessage(events) {
     const context = event.context || {};
     const evidenceText = ({ high: "高", medium: "中", low: "低", watch: "观察中", separate: "抢跑型", invalidated: "区域失效" })[evidence.level] || "待观察";
     const stageText = ({ confirmed: "已确认", invalidated: "原区域失效", developing: "形成中", watching: "等待触发", "front-run": "单独统计" })[evidence.stage] || "形成中";
+    const lifecycle = (event.stages || [event.type]).map(realtimeType).join(" → ");
     return [
       `${index + 1}. ${symbol} · <b>${realtimeType(event.type)}</b>`,
+      event.stages?.length > 1 ? `过程 ${htmlEscape(lifecycle)}` : "",
       `${support ? "支撑 / 潜在反弹" : "阻力 / 潜在回落"} | ${stageText} | 证据 ${evidenceText} (${evidence.score ?? 0})`,
       `价格 ${fmtPrice(event.price)} | 区域 ${fmtPrice(event.zoneLow)} - ${fmtPrice(event.zoneHigh)}`,
       `穿透 ${fmtPct(event.penetrationPct || 0)} | OI ${fmtPct(context.oiChangePct)}`,
       `15分钟成交 ${fmtUsd(context.tradeVolumeUsd)} | 强平 ${fmtUsd(context.liquidationUsd)}`,
       Array.isArray(evidence.reasons) && evidence.reasons.length ? `依据 ${htmlEscape(evidence.reasons.join("、"))}` : "依据 暂无充分猎杀证据",
-    ].join("\n");
+    ].filter(Boolean).join("\n");
   });
-  return `<b>Key Zone Realtime</b>\n${opportunities.length} 次机会 · ${events.length} 个阶段\n只做观察，不自动交易\n\n${rows.join("\n\n")}`;
+  return `<b>${htmlEscape(title)}</b>\n${opportunities.length} 次机会 · ${stageCount} 个阶段\n只做观察，不自动交易\n\n${rows.join("\n\n")}`;
 }
 
 function buildTradingViewWatchlist(records) {
@@ -442,7 +449,13 @@ async function markRealtimeEventsSent(items, state) {
   const sent = new Set(Array.isArray(state.sent) ? state.sent : []);
   items.forEach((item) => sent.add(item.id));
   await mkdir(join(process.cwd(), "data"), { recursive: true });
-  await writeFile(realtimeStateFile, JSON.stringify({ initialized: true, sent: [...sent].slice(-2_000), updatedAt: new Date().toISOString() }, null, 2), "utf8");
+  await writeFile(realtimeStateFile, JSON.stringify({
+    ...state,
+    initialized: true,
+    sent: [...sent].slice(-2_000),
+    threads: (Array.isArray(state.threads) ? state.threads : []).slice(-50),
+    updatedAt: new Date().toISOString(),
+  }, null, 2), "utf8");
 }
 
 async function sendTelegram(text) {
@@ -460,6 +473,84 @@ async function sendTelegram(text) {
   if (!response.ok) {
     throw new Error(payload.description || `Telegram ${response.status}`);
   }
+  return payload.result || null;
+}
+
+async function editTelegram(messageId, text) {
+  const response = await fetchTelegram(telegramApiUrl("editMessageText"), {
+    method: "POST",
+    headers: telegramRequestHeaders({ "content-type": "application/json" }),
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      disable_web_page_preview: true,
+    }),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.description || `Telegram edit ${response.status}`);
+  return payload.result || null;
+}
+
+async function sendCompactRealtime(events, state) {
+  const now = Date.now();
+  const maxAgeMs = 48 * 60 * 60_000;
+  const threads = (Array.isArray(state.threads) ? state.threads : [])
+    .filter((thread) => thread?.messageId && now - Number(thread.createdAt || 0) < maxAgeMs && thread.zones && typeof thread.zones === "object");
+  const threadByZone = new Map();
+  for (const thread of threads) {
+    for (const key of Object.keys(thread.zones)) threadByZone.set(key, thread);
+  }
+
+  const changedThreads = new Set();
+  const newZones = new Map();
+  const escalations = [];
+  for (const event of [...events].sort((a, b) => Number(a.time || 0) - Number(b.time || 0))) {
+    const key = realtimeZoneKey(event);
+    const thread = threadByZone.get(key);
+    if (thread) {
+      thread.zones[key] = mergeRealtimeLifecycle(thread.zones[key], event);
+      thread.updatedAt = now;
+      changedThreads.add(thread);
+      if (shouldEscalateRealtimeEvent(event)) escalations.push(event);
+      continue;
+    }
+    newZones.set(key, mergeRealtimeLifecycle(newZones.get(key), event));
+  }
+
+  for (const thread of changedThreads) {
+    const rows = Object.values(thread.zones);
+    const text = buildRealtimeMessage(rows, "Key Zone Realtime · 状态已更新");
+    try {
+      await editTelegram(thread.messageId, text);
+    } catch (error) {
+      const replacement = await sendTelegram(text);
+      if (!replacement?.message_id) throw error;
+      thread.messageId = replacement.message_id;
+      thread.createdAt = now;
+    }
+  }
+
+  if (escalations.length) {
+    await sendTelegram(buildRealtimeMessage(escalations, "Key Zone · 中高证据收回确认"));
+  }
+
+  const additions = [...newZones.values()];
+  for (let index = 0; index < additions.length; index += 10) {
+    const batch = additions.slice(index, index + 10);
+    const sent = await sendTelegram(buildRealtimeMessage(batch));
+    if (!sent?.message_id) continue;
+    const thread = {
+      messageId: sent.message_id,
+      createdAt: now,
+      updatedAt: now,
+      zones: Object.fromEntries(batch.map((event) => [realtimeZoneKey(event), event])),
+    };
+    threads.push(thread);
+  }
+
+  return { ...state, threads: threads.slice(-50) };
 }
 
 async function sendTelegramDocument(content, filename, caption) {
@@ -480,6 +571,19 @@ async function sendTradingViewWatchlist(records) {
   const symbols = buildTradingViewWatchlist(records);
   if (!symbols.length) return;
   await sendTelegramDocument(symbols.join(","), watchlistFilename(), `TradingView 自选列表｜本批 ${symbols.length} 个标的`);
+}
+
+async function readPeriodicSummaryState() {
+  try { return JSON.parse(await readFile(periodicSummaryStateFile, "utf8")); }
+  catch { return {}; }
+}
+
+async function markPeriodicSummarySent(fingerprint) {
+  await mkdir(join(process.cwd(), "data"), { recursive: true });
+  await writeFile(periodicSummaryStateFile, JSON.stringify({
+    fingerprint,
+    sentAt: new Date().toISOString(),
+  }, null, 2), "utf8");
 }
 
 async function readDailySummaryState() {
@@ -571,9 +675,26 @@ async function run() {
   const signalOk = includeSummary && signalResult.status === "fulfilled" && signalResult.value?.ok;
   const smallCapOk = includeSummary && smallCapResult.status === "fulfilled" && smallCapResult.value?.ok;
   const sections = [];
+  let periodicFingerprint = null;
+  let periodicSummaryIncluded = false;
   if (includeSummary) {
-    sections.push(signalOk ? buildMessage(signalData) : `<b>Position Change Signals</b>\n读取失败: ${htmlEscape(signalData.error || `HTTP ${signalResult.value?.status || "network"}`)}`);
-    sections.push(smallCapOk ? buildSmallCapMessage(smallCapData) : `<b>Low-Cap Position Signals</b>\n读取失败: ${htmlEscape(smallCapData.error || `HTTP ${smallCapResult.value?.status || "network"}`)}`);
+    if (signalOk && smallCapOk) {
+      const summaryState = await readPeriodicSummaryState();
+      periodicFingerprint = periodicSummaryFingerprint(signalData, smallCapData);
+      const lastSentAt = new Date(summaryState.sentAt || 0).getTime();
+      periodicSummaryIncluded = once
+        || summaryState.fingerprint !== periodicFingerprint
+        || !Number.isFinite(lastSentAt)
+        || Date.now() - lastSentAt >= summaryHeartbeatMs;
+      if (periodicSummaryIncluded) {
+        sections.push(buildMessage(signalData));
+        sections.push(buildSmallCapMessage(smallCapData));
+      }
+    } else {
+      periodicSummaryIncluded = true;
+      sections.push(signalOk ? buildMessage(signalData) : `<b>Position Change Signals</b>\n读取失败: ${htmlEscape(signalData.error || `HTTP ${signalResult.value?.status || "network"}`)}`);
+      sections.push(smallCapOk ? buildSmallCapMessage(smallCapData) : `<b>Low-Cap Position Signals</b>\n读取失败: ${htmlEscape(smallCapData.error || `HTTP ${smallCapResult.value?.status || "network"}`)}`);
+    }
   }
   let reversalState = null;
   let newReversalRecords = [];
@@ -595,7 +716,7 @@ async function run() {
     realtimeNotifications = newRealtimeEvents.filter((event) => shouldNotifyRealtimeEvent(event, quietMode));
     realtimeBaseline = fresh.baseline;
     initializeRealtimeState = fresh.initialize;
-    if (realtimeNotifications.length) sections.push(buildRealtimeMessage(realtimeNotifications));
+    if (realtimeNotifications.length && !compactRealtimeMode) sections.push(buildRealtimeMessage(realtimeNotifications));
   }
   let onchainState = null;
   let newOnchainEvents = [];
@@ -605,8 +726,17 @@ async function run() {
     newOnchainEvents = fresh.fresh;
     if (newOnchainEvents.length) sections.push(buildOnchainMessage(newOnchainEvents));
   }
+  let compactRealtimeHandled = false;
+  if (compactRealtimeMode && realtimeState && (initializeRealtimeState || newRealtimeEvents.length || realtimeBaseline.length)) {
+    if (realtimeNotifications.length) {
+      realtimeState = await sendCompactRealtime(realtimeNotifications, realtimeState);
+    }
+    await markRealtimeEventsSent([...newRealtimeEvents, ...realtimeBaseline], realtimeState);
+    compactRealtimeHandled = true;
+  }
   if (sections.length) {
     await sendTelegram(sections.join("\n\n"));
+    if (periodicSummaryIncluded && periodicFingerprint) await markPeriodicSummarySent(periodicFingerprint);
     if (newReversalRecords.length && !quietMode) {
       try {
         await sendTradingViewWatchlist(newReversalRecords);
@@ -615,13 +745,13 @@ async function run() {
       }
     }
     if (reversalState && newReversalRecords.length) await markReversalRecordsSent(newReversalRecords, reversalState);
-    if (realtimeState && (initializeRealtimeState || newRealtimeEvents.length || realtimeBaseline.length)) {
+    if (!compactRealtimeHandled && realtimeState && (initializeRealtimeState || newRealtimeEvents.length || realtimeBaseline.length)) {
       await markRealtimeEventsSent([...newRealtimeEvents, ...realtimeBaseline], realtimeState);
     }
     if (onchainState && newOnchainEvents.length) await markOnchainEventsSent(newOnchainEvents, onchainState);
   }
   if (includeSummary) lastSummaryAt = Date.now();
-  if (!sections.length && realtimeState && (initializeRealtimeState || newRealtimeEvents.length || realtimeBaseline.length)) {
+  if (!sections.length && !compactRealtimeHandled && realtimeState && (initializeRealtimeState || newRealtimeEvents.length || realtimeBaseline.length)) {
     await markRealtimeEventsSent([...newRealtimeEvents, ...realtimeBaseline], realtimeState);
   }
   if (manualPushResult.status === "fulfilled" && manualPushResult.value.ok) await sendManualPushRequests(manualPushData);
@@ -629,7 +759,7 @@ async function run() {
   if (reversalResult.status === "fulfilled" && reversalResult.value.ok && realtimeResult.status === "fulfilled" && realtimeResult.value.ok) {
     sentDailySummary = await maybeSendDailySummary(reversalData, realtimeData);
   }
-  if (!sections.length && !sentDailySummary && !(Array.isArray(manualPushData.requests) && manualPushData.requests.length)) {
+  if (!sections.length && !realtimeNotifications.length && !sentDailySummary && !(Array.isArray(manualPushData.requests) && manualPushData.requests.length)) {
     console.log(`[${new Date().toISOString()}] checked: no new records`);
     return;
   }
