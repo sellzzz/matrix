@@ -112,6 +112,10 @@ function makeEvent(runtime, raw) {
 }
 
 function scopeKey(runtime) {
+  return runtime.key;
+}
+
+function approachScopeKey(runtime) {
   return `${runtime.candidate.symbol}:${runtime.candidate.side}`;
 }
 
@@ -164,7 +168,7 @@ async function saveState() {
     evidence: summarizeEvidence(runtime, tradeContext(runtime.candidate.symbol, now)),
   })).sort((a, b) => a.distancePct - b.distancePct);
   const payload = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     generatedAt: new Date().toISOString(),
     status: connected ? "monitoring" : "connecting",
     connected,
@@ -179,6 +183,8 @@ async function saveState() {
       approachCooldownHours: 6,
       evidenceWindowMinutes: 15,
       followUpHours: 4,
+      acceptedBreakoutHoldMinutes: 3,
+      acceptedBreakoutBufferPct: 0.3,
     },
     active,
     events: events.slice(0, MAX_EVENTS),
@@ -206,17 +212,15 @@ function recordPrice(symbol, price, time) {
     if (produced.length) {
       const accepted = produced.filter((row) => {
         if (row.type !== "approaching") return true;
-        const previous = activeCooldown(approachCooldowns, scope, time, APPROACH_COOLDOWN_MS);
+        const approachScope = approachScopeKey(runtime);
+        const previous = activeCooldown(approachCooldowns, approachScope, time, APPROACH_COOLDOWN_MS);
         if (previous) return false;
-        approachCooldowns.set(scope, { time, zoneKey: runtime.key });
+        approachCooldowns.set(approachScope, { time, zoneKey: runtime.key });
         return true;
       });
       const significant = accepted.find((row) => ["touched", "swept", "front-run"].includes(row.type));
       if (significant) {
         signalCooldowns.set(scope, { time, zoneKey: runtime.key });
-        for (const sibling of runtimesBySymbol.get(symbol) || []) {
-          if (sibling !== runtime && sibling.candidate.side === runtime.candidate.side && !sibling.touchAt) sibling.phase = "cooldown";
-        }
       }
       events.unshift(...accepted.map((row) => makeEvent(runtime, row)));
       events = events.slice(0, MAX_EVENTS);
@@ -400,16 +404,16 @@ async function start() {
     const previous = JSON.parse(await readFile(config.reversalRealtimeFile, "utf8"));
     events = Array.isArray(previous.events) ? previous.events.slice(0, MAX_EVENTS) : [];
     for (const event of events) {
-      const scope = `${event.symbol}:${event.side}`;
+      const approachScope = `${event.symbol}:${event.side}`;
       const time = finite(event.time);
       const zoneKey = event.zoneKey || candidateKey(event);
       if (event.type === "approaching") {
-        const current = approachCooldowns.get(scope);
-        if (!current || time > current.time) approachCooldowns.set(scope, { time, zoneKey });
+        const current = approachCooldowns.get(approachScope);
+        if (!current || time > current.time) approachCooldowns.set(approachScope, { time, zoneKey });
       }
-      if (["touched", "swept", "front-run", "reclaimed"].includes(event.type)) {
-        const current = signalCooldowns.get(scope);
-        if (!current || time > current.time) signalCooldowns.set(scope, { time, zoneKey });
+      if (["touched", "swept", "front-run", "reclaimed", "accepted"].includes(event.type)) {
+        const current = signalCooldowns.get(zoneKey);
+        if (!current || time > current.time) signalCooldowns.set(zoneKey, { time, zoneKey });
       }
     }
     rebuildTrackedEvents();

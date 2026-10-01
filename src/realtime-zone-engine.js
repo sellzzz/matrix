@@ -1,4 +1,6 @@
 const MINUTE_MS = 60_000;
+const ACCEPTANCE_HOLD_MS = 3 * MINUTE_MS;
+const ACCEPTANCE_BUFFER = 0.003;
 
 export function candidateKey(candidate) {
   return [candidate.symbol, candidate.side, candidate.originTime, candidate.zoneLow, candidate.zoneHigh].join(":");
@@ -48,6 +50,14 @@ export function groupZoneEvents(events = []) {
   }
   for (const episode of episodeMap.values()) {
     if (episode.stages.includes("reclaimed")) episode.evidence = { ...episode.evidence, stage: "confirmed" };
+    else if (episode.stages.includes("accepted")) {
+      episode.evidence = {
+        score: 0,
+        level: "invalidated",
+        stage: "invalidated",
+        reasons: ["持续运行在区域外侧，原区域失效"],
+      };
+    }
     else if (episode.stages.includes("front-run")) episode.evidence = { ...episode.evidence, stage: "front-run" };
   }
   return [...episodeMap.values()].sort((a, b) => b.updatedAt - a.updatedAt);
@@ -92,6 +102,7 @@ export function createZoneRuntime(candidate) {
     touchAt: null,
     touchPrice: null,
     maximumPenetrationPct: 0,
+    outsideSince: null,
     lastPrice: Number(candidate.currentPrice) || null,
     lastEventAt: 0,
   };
@@ -148,8 +159,14 @@ export function processZonePrice(runtime, rawPrice, at = Date.now()) {
     runtime.maximumPenetrationPct = penetration;
     events.push(event(runtime, runtime.phase, price, at, { distancePct: 0, penetrationPct: penetration }));
   } else if (["touched", "swept"].includes(runtime.phase)) {
+    const previousPhase = runtime.phase;
     runtime.maximumPenetrationPct = Math.max(runtime.maximumPenetrationPct, penetration);
-    if (penetration > 0) runtime.phase = "swept";
+    if (penetration > 0) {
+      runtime.phase = "swept";
+      if (previousPhase === "touched") {
+        events.push(event(runtime, "swept", price, at, { penetrationPct: penetration }));
+      }
+    }
   }
 
   const reclaimBuffer = 0.001;
@@ -164,6 +181,21 @@ export function processZonePrice(runtime, rawPrice, at = Date.now()) {
       reclaimSeconds,
       penetrationPct: runtime.maximumPenetrationPct,
     }));
+  }
+
+  const acceptedBeyond = candidate.side === "support"
+    ? price <= candidate.zoneLow * (1 - ACCEPTANCE_BUFFER)
+    : price >= candidate.zoneHigh * (1 + ACCEPTANCE_BUFFER);
+  if (runtime.phase === "swept") {
+    if (acceptedBeyond) runtime.outsideSince ||= at;
+    else runtime.outsideSince = null;
+    if (runtime.outsideSince && at - runtime.outsideSince >= ACCEPTANCE_HOLD_MS) {
+      runtime.phase = "accepted";
+      events.push(event(runtime, "accepted", price, at, {
+        holdSeconds: Math.round((at - runtime.outsideSince) / 1000),
+        penetrationPct: runtime.maximumPenetrationPct,
+      }));
+    }
   }
 
   const movedAway = distancePct >= runtime.closestDistancePct + 1;
@@ -184,6 +216,9 @@ export function summarizeEvidence(runtime, context = {}, eventType = runtime.pha
   }
   if (eventType === "front-run") {
     return { score: 0, level: "separate", stage: "front-run", reasons: ["未触及区域，单独统计"] };
+  }
+  if (eventType === "accepted") {
+    return { score: 0, level: "invalidated", stage: "invalidated", reasons: ["持续运行在区域外侧，原区域失效"] };
   }
   const reclaimSeconds = Number(context.reclaimSeconds);
   const penetrationPct = Number(context.penetrationPct ?? runtime.maximumPenetrationPct);

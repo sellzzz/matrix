@@ -66,7 +66,7 @@ function plainDirection(row) {
 }
 
 function buildDailyReviewText(records, episodes, dateKey) {
-  const typeLabels = { approaching: "接近", touched: "触及", swept: "穿透", reclaimed: "收回确认", "front-run": "未触及转向" };
+  const typeLabels = { approaching: "接近", touched: "触及", swept: "穿透", reclaimed: "收回确认", accepted: "突破成立", "front-run": "未触及转向" };
   const todayRecords = records
     .filter((row) => shanghaiDateKey(row.recordedAt || row.triggerTime || row.touchTime) === dateKey)
     .sort((a, b) => new Date(a.recordedAt || 0) - new Date(b.recordedAt || 0));
@@ -212,8 +212,8 @@ function renderRealtime(events) {
     els.realtimeBody.innerHTML = '<tr><td class="empty" colspan="6">监控已就绪，等待候选标的产生实时事件</td></tr>';
     return;
   }
-  const typeLabels = { approaching: "接近", touched: "触及", swept: "穿透", reclaimed: "收回确认", "front-run": "未触及转向" };
-  const evidenceLabels = { high: "高", medium: "中", low: "低", watch: "观察中", separate: "抢跑型" };
+  const typeLabels = { approaching: "接近", touched: "触及", swept: "穿透", reclaimed: "收回确认", accepted: "突破成立", "front-run": "未触及转向" };
+  const evidenceLabels = { high: "高", medium: "中", low: "低", watch: "观察中", separate: "抢跑型", invalidated: "区域失效" };
   els.realtimeBody.innerHTML = events.map((event) => {
     const context = event.context || {};
     const evidence = event.evidence || {};
@@ -226,7 +226,7 @@ function renderRealtime(events) {
     return `<tr>
       <td>${fmtDateTime(event.time)}</td>
       <td class="symbol">${tradingViewLink(event, true)}<small>${event.side === "support" ? "支撑" : "阻力"}</small></td>
-      <td class="${event.type === "reclaimed" ? "positive" : ""}">${escapeHtml(typeLabels[event.type] || event.type)}<small>${event.eventCount > 1 ? `${event.eventCount} 个阶段` : ""}</small></td>
+      <td class="${event.type === "reclaimed" ? "positive" : event.type === "accepted" ? "negative" : ""}">${escapeHtml(typeLabels[event.type] || event.type)}<small>${event.eventCount > 1 ? `${event.eventCount} 个阶段` : ""}</small></td>
       <td><b>${fmtPrice(event.price)}</b><small>${fmtPrice(event.zoneLow)} - ${fmtPrice(event.zoneHigh)}</small></td>
       <td><b>${evidenceLabels[evidence.level] || "待观察"} · ${evidence.score ?? 0}</b><small>${escapeHtml((evidence.reasons || []).join("、") || "暂无充分证据")}</small></td>
       <td><b>${resultText}</b><small>OI ${Number.isFinite(Number(context.oiChangePct)) ? `${Number(context.oiChangePct).toFixed(2)}%` : "-"} · 强平 ${fmtUsd(context.liquidationUsd)}</small></td>

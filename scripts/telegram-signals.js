@@ -249,6 +249,7 @@ function realtimeType(type) {
     touched: "触及区域",
     swept: "穿透区域",
     reclaimed: "收回确认",
+    accepted: "突破成立 / 原区域失效",
     "front-run": "未触及转向",
   })[type] || type;
 }
@@ -268,8 +269,8 @@ function buildRealtimeMessage(events) {
       : `<b>${htmlEscape(chart.symbol || event.symbol || "-")}</b>`;
     const evidence = event.evidence || {};
     const context = event.context || {};
-    const evidenceText = ({ high: "高", medium: "中", low: "低", watch: "观察中", separate: "抢跑型" })[evidence.level] || "待观察";
-    const stageText = ({ confirmed: "已确认", developing: "形成中", watching: "等待触发", "front-run": "单独统计" })[evidence.stage] || "形成中";
+    const evidenceText = ({ high: "高", medium: "中", low: "低", watch: "观察中", separate: "抢跑型", invalidated: "区域失效" })[evidence.level] || "待观察";
+    const stageText = ({ confirmed: "已确认", invalidated: "原区域失效", developing: "形成中", watching: "等待触发", "front-run": "单独统计" })[evidence.stage] || "形成中";
     return [
       `${index + 1}. ${symbol} · <b>${realtimeType(event.type)}</b>`,
       `${support ? "支撑 / 潜在反弹" : "阻力 / 潜在回落"} | ${stageText} | 证据 ${evidenceText} (${evidence.score ?? 0})`,
