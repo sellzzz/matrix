@@ -8,12 +8,13 @@ import { config } from "./src/config.js";
 import { createJsonStore } from "./src/json-store.js";
 import { createRouter } from "./src/router.js";
 import { groupZoneEvents, summarizeFollowUpEpisodes } from "./src/realtime-zone-engine.js";
+import { canRearmZone, selectRearmedEntries } from "./src/reversal-reentry.js";
 
 const packageMeta = JSON.parse(readFileSync(new URL("./package.json", import.meta.url), "utf8"));
 const SERVER_STARTED_AT = new Date().toISOString();
 const REALTIME_SCHEMA_VERSION = 2;
 
-const { port: PORT, publicDir: PUBLIC_DIR, binanceFapi: BINANCE_FAPI, coingeckoApi: COINGECKO_API, dexscreenerApi: DEXSCREENER_API, bscRpc: BSC_RPC, cacheMs: CACHE_MS, macroCacheMs: MACRO_CACHE_MS, fetchTimeoutMs: FETCH_TIMEOUT_MS, maxScanCache: MAX_SCAN_CACHE, reversalCacheMs: REVERSAL_CACHE_MS, reversalTopFutures: REVERSAL_TOP_FUTURES, reversalMaxAssets: REVERSAL_MAX_ASSETS, reversalHistoryFile: REVERSAL_HISTORY_FILE, reversalHistoryLimit: REVERSAL_HISTORY_LIMIT, reversalManualPushFile: REVERSAL_MANUAL_PUSH_FILE, reversalCandidateFile: REVERSAL_CANDIDATE_FILE, reversalRealtimeFile: REVERSAL_REALTIME_FILE, onchainAlertsFile: ONCHAIN_ALERTS_FILE, onchainAlertLimit: ONCHAIN_ALERT_LIMIT, onchainPriceCacheMs: ONCHAIN_PRICE_CACHE_MS, onchainCheckConcurrency: ONCHAIN_CHECK_CONCURRENCY, reversalSignalCooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, fredApi: FRED_API, treasuryCurveCsv: TREASURY_CURVE_CSV, cmeFedwatchApi: CME_FEDWATCH_API, concurrency: CONCURRENCY } = config;
+const { port: PORT, publicDir: PUBLIC_DIR, binanceFapi: BINANCE_FAPI, coingeckoApi: COINGECKO_API, dexscreenerApi: DEXSCREENER_API, bscRpc: BSC_RPC, cacheMs: CACHE_MS, macroCacheMs: MACRO_CACHE_MS, fetchTimeoutMs: FETCH_TIMEOUT_MS, maxScanCache: MAX_SCAN_CACHE, reversalCacheMs: REVERSAL_CACHE_MS, reversalTopFutures: REVERSAL_TOP_FUTURES, reversalMaxAssets: REVERSAL_MAX_ASSETS, reversalHistoryFile: REVERSAL_HISTORY_FILE, reversalHistoryLimit: REVERSAL_HISTORY_LIMIT, reversalManualPushFile: REVERSAL_MANUAL_PUSH_FILE, reversalCandidateFile: REVERSAL_CANDIDATE_FILE, reversalRealtimeFile: REVERSAL_REALTIME_FILE, onchainAlertsFile: ONCHAIN_ALERTS_FILE, onchainAlertLimit: ONCHAIN_ALERT_LIMIT, onchainPriceCacheMs: ONCHAIN_PRICE_CACHE_MS, onchainCheckConcurrency: ONCHAIN_CHECK_CONCURRENCY, reversalSignalCooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, reversalRearmDistancePct: REVERSAL_REARM_DISTANCE_PCT, fredApi: FRED_API, treasuryCurveCsv: TREASURY_CURVE_CSV, cmeFedwatchApi: CME_FEDWATCH_API, concurrency: CONCURRENCY } = config;
 
 let symbolsCache = { at: 0, data: [] };
 let marketCapCache = { at: 0, data: new Map() };
@@ -569,24 +570,39 @@ function buildReversalSignal(asset, dailyCandles, triggerCandles) {
   const current = triggerCandles.at(-1);
   const previous = triggerCandles.at(-2);
   const proximityPct = 1.2;
+  const cooldownMs = REVERSAL_SIGNAL_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
   const candidates = [];
 
   for (const zone of buildDailyZones(asset, dailyCandles)) {
       if (current.timestamp < zone.eligibleTime) continue;
-      const entries = findZoneEntries(triggerCandles.slice(0, -1), zone);
       const triggerHistoryStart = triggerCandles[0]?.timestamp ?? current.timestamp;
-      const hasOlderDailyTouch = dailyCandles.some((candle) =>
+      const olderDailyTouches = dailyCandles.filter((candle) =>
         candle.timestamp >= zone.eligibleTime
         && candle.timestamp < triggerHistoryStart
         && touchesZone(candle, zone));
-      const hasPriorEntry = hasOlderDailyTouch || entries.length > 0;
-      const isTouching = isValidEntry(current, previous, zone, zone.side) && !hasPriorEntry;
+      const baselineTime = olderDailyTouches.at(-1)?.timestamp;
+      const entries = selectRearmedEntries(
+        findZoneEntries(triggerCandles.slice(0, -1), zone),
+        triggerCandles,
+        zone,
+        { baselineTime, cooldownMs, rearmDistancePct: REVERSAL_REARM_DISTANCE_PCT },
+      );
+      const lastPriorTouchTime = entries.at(-1)?.timestamp ?? baselineTime;
+      const isRearmed = canRearmZone(
+        triggerCandles,
+        zone,
+        lastPriorTouchTime,
+        current.timestamp,
+        { cooldownMs, rearmDistancePct: REVERSAL_REARM_DISTANCE_PCT },
+      );
+      const hasPriorEntry = Number.isFinite(lastPriorTouchTime);
+      const isTouching = isValidEntry(current, previous, zone, zone.side) && isRearmed;
       const distance = zoneDistancePct(current.close, zone);
       const movingToward = zone.side === "support"
         ? current.close < previous.close
         : current.close > previous.close;
       const approachingFromSafeSide = isSafeSide(current, zone, zone.side);
-      const isApproaching = !hasPriorEntry && !isTouching && approachingFromSafeSide && movingToward && Math.abs(distance) <= proximityPct;
+      const isApproaching = isRearmed && !isTouching && approachingFromSafeSide && movingToward && Math.abs(distance) <= proximityPct;
       candidates.push({
         ...zone,
         touchTime: current.timestamp,
@@ -603,8 +619,12 @@ function buildReversalSignal(asset, dailyCandles, triggerCandles) {
         isApproaching,
         isFirstApproach: isApproaching,
         isSecondApproach: isApproaching,
-        priorTouchCount: hasPriorEntry ? 1 : 0,
+        priorTouchCount: entries.length + (Number.isFinite(baselineTime) ? 1 : 0),
         hadPriorTouch: hasPriorEntry,
+        lastPriorTouchTime: Number.isFinite(lastPriorTouchTime) ? lastPriorTouchTime : null,
+        isRearmed,
+        cooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS,
+        rearmDistancePct: REVERSAL_REARM_DISTANCE_PCT,
       });
   }
 
@@ -738,17 +758,22 @@ function buildReversalStats(asset, dailyCandles, triggerCandles, horizon, target
   const horizonMs = horizon * 24 * 60 * 60 * 1000;
   const candidates = [];
   const dailyZones = buildDailyZones(asset, dailyCandles);
+  const cooldownMs = REVERSAL_SIGNAL_COOLDOWN_DAYS * 24 * 60 * 60 * 1000;
   for (const zone of dailyZones) {
-    const entryCandle = findZoneEntries(triggerCandles, zone)[0];
-    if (!entryCandle) continue;
-    candidates.push({
-      ...zone,
-      touchTime: entryCandle.timestamp,
-      triggerTime: entryCandle.timestamp,
-      triggerPrice: zone.side === "support" ? zone.zoneHigh : zone.zoneLow,
-      triggerCandle: { open: entryCandle.open, high: entryCandle.high, low: entryCandle.low, close: entryCandle.close },
-      distancePct: 0,
+    const entries = selectRearmedEntries(findZoneEntries(triggerCandles, zone), triggerCandles, zone, {
+      cooldownMs,
+      rearmDistancePct: REVERSAL_REARM_DISTANCE_PCT,
     });
+    for (const entryCandle of entries) {
+      candidates.push({
+        ...zone,
+        touchTime: entryCandle.timestamp,
+        triggerTime: entryCandle.timestamp,
+        triggerPrice: zone.side === "support" ? zone.zoneHigh : zone.zoneLow,
+        triggerCandle: { open: entryCandle.open, high: entryCandle.high, low: entryCandle.low, close: entryCandle.close },
+        distancePct: 0,
+      });
+    }
   }
 
   const signals = dedupeReversalSignals(candidates.sort((a, b) => a.touchTime - b.touchTime || a.originTime - b.originTime));
@@ -814,7 +839,7 @@ function buildReversalStats(asset, dailyCandles, triggerCandles, horizon, target
   const avg = (rows, field) => rows.length ? rows.reduce((sum, row) => sum + Number(row[field] || 0), 0) / rows.length : null;
   return {
     generatedAt: new Date().toISOString(), symbol: asset.symbol, market: asset.market, anchorTimeframe: "1D", triggerTimeframe: "4h", horizonDays: horizon, targetPct,
-    cooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, samples: dedupedSamples.length, resolved: resolved.length, successful: dedupedSamples.filter((row) => row.outcome === "successful").length, invalidated: dedupedSamples.filter((row) => row.outcome === "invalidated").length, timeout: dedupedSamples.filter((row) => row.outcome === "timeout").length,
+    cooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, rearmDistancePct: REVERSAL_REARM_DISTANCE_PCT, samples: dedupedSamples.length, resolved: resolved.length, successful: dedupedSamples.filter((row) => row.outcome === "successful").length, invalidated: dedupedSamples.filter((row) => row.outcome === "invalidated").length, timeout: dedupedSamples.filter((row) => row.outcome === "timeout").length,
     ambiguous: dedupedSamples.filter((row) => row.outcome === "ambiguous").length, indicatorHitRate: hitRate(resolved), supportHitRate: hitRate(supportRows), resistanceHitRate: hitRate(resistanceRows), winRate: hitRate(resolved), averageBarsToOutcome: avg(resolved, "barsToOutcome"), averageMaxFavorablePct: avg(dedupedSamples, "maxFavorablePct"), averageMaxAdversePct: avg(dedupedSamples, "maxAdversePct"), coverage: { dailyCandles: dailyCandles.length, triggerCandles: triggerCandles.length, dailyZones: dailyZones.length, entries: candidates.length }, records: dedupedSamples, recent: dedupedSamples.slice(-20).reverse(),
   };
 }
@@ -846,7 +871,7 @@ async function handleReversalStats(req, res) {
     const rate = (rows) => rows.length ? rows.filter((row) => row.outcome === "successful").length / rows.length : null;
     const average = (field) => records.length ? records.reduce((sum, row) => sum + Number(row[field] || 0), 0) / records.length : null;
     return json(res, 200, {
-      generatedAt: new Date().toISOString(), symbol: symbols || "DEFAULT_WATCHLIST", assetsRequested: assets.length, assetsWithData: valid.length, assetsFailed: results.filter((result) => result.error).map((result) => ({ symbol: result.symbol, error: result.error })), assetsCoverage: valid.map((result) => ({ symbol: result.symbol, ...result.coverage })), anchorTimeframe: "1D", triggerTimeframe: "4h", horizonDays: horizon, targetPct, cooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS,
+      generatedAt: new Date().toISOString(), symbol: symbols || "DEFAULT_WATCHLIST", assetsRequested: assets.length, assetsWithData: valid.length, assetsFailed: results.filter((result) => result.error).map((result) => ({ symbol: result.symbol, error: result.error })), assetsCoverage: valid.map((result) => ({ symbol: result.symbol, ...result.coverage })), anchorTimeframe: "1D", triggerTimeframe: "4h", horizonDays: horizon, targetPct, cooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS, rearmDistancePct: REVERSAL_REARM_DISTANCE_PCT,
       samples: records.length, resolved: resolved.length, successful: successful.length, invalidated: records.filter((row) => row.outcome === "invalidated").length, timeout: records.filter((row) => row.outcome === "timeout").length, ambiguous: records.filter((row) => row.outcome === "ambiguous").length, indicatorHitRate: rate(resolved), supportHitRate: rate(support), resistanceHitRate: rate(resistance), averageBarsToOutcome: resolved.length ? resolved.reduce((sum, row) => sum + Number(row.barsToOutcome || 0), 0) / resolved.length : null, averageMaxFavorablePct: average("maxFavorablePct"), averageMaxAdversePct: average("maxAdversePct"), records, recent: records.slice(-20).reverse(),
     });
   } catch (error) {
@@ -889,6 +914,8 @@ async function scanReversalData(requested, selectionMode) {
     minimumAgeDays: REVERSAL_MIN_AGE_DAYS,
     fourHourCandidates: rows.filter((row) => row.fourHourScanned).length,
     proximityPct: 1.2,
+    cooldownDays: REVERSAL_SIGNAL_COOLDOWN_DAYS,
+    rearmDistancePct: REVERSAL_REARM_DISTANCE_PCT,
     minimumAgeText: `日线区域至少形成 ${REVERSAL_MIN_AGE_DAYS} 天`,
     rows,
     signals: rows.flatMap((row) => row.signals.map((signal) => {
@@ -900,7 +927,7 @@ async function scanReversalData(requested, selectionMode) {
     const nearby = rows
       .filter((row) => row.source === "binance" && row.fourHourScanned && Number.isFinite(row.current?.price))
       .flatMap((row) => row.zones
-        .filter((zone) => !zone.hadPriorTouch && zone.distancePct <= 5)
+        .filter((zone) => zone.isRearmed && zone.distancePct <= 5)
         .map((zone) => ({
           symbol: row.symbol,
           tradingViewSymbol: row.tradingViewSymbol,

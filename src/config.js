@@ -31,4 +31,5 @@ export const config = Object.freeze({
   cmeFedwatchApi: process.env.CME_FEDWATCH_API_URL || "https://markets.api.cmegroup.com/fedwatch/v1",
   concurrency: 12,
   reversalSignalCooldownDays: 7,
+  reversalRearmDistancePct: 3,
 });

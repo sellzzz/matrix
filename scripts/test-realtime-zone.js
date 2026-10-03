@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createZoneRuntime, directionalReturnPct, groupZoneEvents, processZonePrice, summarizeEvidence, summarizeFollowUpEpisodes } from "../src/realtime-zone-engine.js";
+import { canRearmZone, isSafeDeparture, selectRearmedEntries } from "../src/reversal-reentry.js";
 import { shouldNotifyRealtimeEvent } from "../src/telegram-quiet-mode.js";
 import { canSendAutomatedPush, mergeRealtimeLifecycle, periodicSummaryFingerprint, realtimeZoneKey } from "../src/telegram-push-policy.js";
 
@@ -78,5 +79,45 @@ assert.notEqual(
   periodicSummaryFingerprint({ alerts: [{ symbol: "BTCUSDT", changePct: 10 }] }, { smallCaps: [] }),
   periodicSummaryFingerprint({ alerts: [{ symbol: "ETHUSDT", changePct: 10 }] }, { smallCaps: [] }),
 );
+
+const day = 24 * 60 * 60 * 1000;
+const reentryZone = { side: "support", zoneLow: 9.8, zoneHigh: 10 };
+const reentryCandles = [
+  { timestamp: 0, close: 10.2 },
+  { timestamp: 1 * day, close: 10.1 },
+  { timestamp: 2 * day, close: 10.4 },
+  { timestamp: 6 * day, close: 10.2 },
+  { timestamp: 8 * day, close: 10.1 },
+  { timestamp: 12 * day, close: 10.5 },
+  { timestamp: 16 * day, close: 10.1 },
+];
+const reentryOptions = { cooldownMs: 7 * day, rearmDistancePct: 3 };
+assert.equal(isSafeDeparture(reentryCandles[2], reentryZone, 3), true);
+assert.equal(canRearmZone(reentryCandles, reentryZone, 1 * day, 6 * day, reentryOptions), false);
+assert.equal(canRearmZone(reentryCandles, reentryZone, 1 * day, 8 * day, reentryOptions), true);
+assert.equal(canRearmZone([
+  { timestamp: 1 * day, close: 10.1 },
+  { timestamp: 5 * day, close: 10.2 },
+  { timestamp: 9 * day, close: 10.1 },
+], reentryZone, 1 * day, 9 * day, reentryOptions), false);
+assert.deepEqual(
+  selectRearmedEntries(
+    [reentryCandles[1], reentryCandles[3], reentryCandles[4], reentryCandles[6]],
+    reentryCandles,
+    reentryZone,
+    reentryOptions,
+  ).map((entry) => entry.timestamp),
+  [1 * day, 8 * day, 16 * day],
+);
+assert.deepEqual(
+  selectRearmedEntries([reentryCandles[3], reentryCandles[4]], reentryCandles, reentryZone, {
+    ...reentryOptions,
+    baselineTime: 0,
+  }).map((entry) => entry.timestamp),
+  [8 * day],
+);
+const resistanceReentryZone = { side: "resistance", zoneLow: 100, zoneHigh: 102 };
+assert.equal(isSafeDeparture({ close: 96.9 }, resistanceReentryZone, 3), true);
+assert.equal(isSafeDeparture({ close: 97.1 }, resistanceReentryZone, 3), false);
 
 console.log("realtime zone engine tests passed");
